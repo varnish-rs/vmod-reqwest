@@ -243,4 +243,3 @@ sed -e "s/@VMOD_VERSION@/$VMOD_VERSION/" -e "s/@VARNISH_VERSION@/$VARNISH_VERSIO
 su builder -c "abuild checksum"
 su builder -c "abuild -r"
 ```
-
