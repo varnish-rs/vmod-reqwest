@@ -1,14 +1,14 @@
 pub mod reqwest_private {
     use std::boxed::Box;
     use std::io::Write;
-    use std::os::raw::{ c_uint, c_void};
+    use std::os::raw::{c_uint, c_void};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant, SystemTime};
 
-    use reqwest::{Client, Url};
     use anyhow::Error;
     use bytes::Bytes;
+    use reqwest::{Client, Url};
     use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
     use varnish::ffi::{BS_CACHED, BS_ERROR, BS_NONE};
     use varnish::vcl::{
@@ -170,9 +170,8 @@ pub mod reqwest_private {
             for (k, v) in &resp.headers {
                 beresp.set_header(
                     k.as_str(),
-                    v.to_str().map_err(|e| {
-                        <String as Into<VclError>>::into(e.to_string())
-                    })?,
+                    v.to_str()
+                        .map_err(|e| <String as Into<VclError>>::into(e.to_string()))?,
                 )?;
             }
             Ok(Some(BackendResp {
@@ -629,7 +628,9 @@ pub mod reqwest_private {
         probe.initial = std::cmp::min(probe.initial, probe.threshold);
         let spec_url = match probe.request {
             ProbeRequest::Url(ref u) => u,
-            ProbeRequest::Text(_) => return Err(VclError::new("can't use a probe without .url".to_string())),
+            ProbeRequest::Text(_) => {
+                return Err(VclError::new("can't use a probe without .url".to_string()))
+            }
         };
         let url = if let Some(base_url) = base_url {
             let full_url = format!("{base_url}{spec_url}");

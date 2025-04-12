@@ -17,7 +17,10 @@ mod reqwest {
     use varnish::ffi::{VCL_BACKEND, VCL_STRING};
     use varnish::vcl::{Backend, Ctx, Event, IntoVCL, Probe, VclError};
 
-    use crate::implementation::reqwest_private::{BgThread, Entry, ReqBody, Request, RespMsg, VCLBackend, VclTransaction, build_probe_state, client, process_req};
+    use crate::implementation::reqwest_private::{
+        build_probe_state, client, process_req, BgThread, Entry, ReqBody, Request, RespMsg,
+        VCLBackend, VclTransaction,
+    };
 
     impl client {
         #[allow(clippy::too_many_arguments)]
@@ -96,7 +99,9 @@ mod reqwest {
             if follow <= 0 {
                 rcb = rcb.redirect(reqwest::redirect::Policy::none());
             } else {
-                rcb = rcb.redirect(reqwest::redirect::Policy::limited(usize::try_from(follow).unwrap()));
+                rcb = rcb.redirect(reqwest::redirect::Policy::limited(
+                    usize::try_from(follow).unwrap(),
+                ));
             }
             let reqwest_client = rcb.build().map_err(|e| {
                 VclError::new(format!("reqwest: couldn't initialize {vcl_name} ({e})"))
@@ -240,7 +245,9 @@ mod reqwest {
             /// request handle
             name: &str,
         ) -> Result<(), Box<dyn Error>> {
-            let VclTransaction::Req(req) = self.get_transaction(vp_task, name)? else { return Err(name.into()) };
+            let VclTransaction::Req(req) = self.get_transaction(vp_task, name)? else {
+                return Err(name.into());
+            };
             // XXX: we'll always have one of those, but maybe people would want
             // `req_top`, or even `bereq` while in `vcl_pipe`?
             let vcl_req = ctx.http_req.as_ref().or(ctx.http_bereq.as_ref()).unwrap();
@@ -352,10 +359,7 @@ mod reqwest {
     }
 
     #[event]
-    pub fn event(
-        #[shared_per_vcl] vp_vcl: &mut Option<Box<BgThread>>,
-        event: Event,
-    ) {
+    pub fn event(#[shared_per_vcl] vp_vcl: &mut Option<Box<BgThread>>, event: Event) {
         // we only need to worry about Load, BgThread will be destroyed with the VPriv when the VCL is
         // discarded
         if let Event::Load = event {
