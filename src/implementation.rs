@@ -1,15 +1,14 @@
 pub mod reqwest_private {
     use std::boxed::Box;
     use std::io::Write;
-    use std::os::raw::{c_char, c_uint, c_void};
+    use std::os::raw::{ c_uint, c_void};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
     use std::time::{Duration, Instant, SystemTime};
 
-    use ::reqwest::{Client, Url};
+    use reqwest::{Client, Url};
     use anyhow::Error;
     use bytes::Bytes;
-    //use reqwest::header::HeaderValue;
     use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
     use varnish::ffi::{BS_CACHED, BS_ERROR, BS_NONE};
     use varnish::vcl::{
@@ -20,7 +19,7 @@ pub mod reqwest_private {
     pub struct ProbeState {
         spec: Probe,
         history: AtomicU64,
-        health_changed: std::time::SystemTime,
+        health_changed: SystemTime,
         url: Url,
         join_handle: Option<tokio::task::JoinHandle<()>>,
         avg: Mutex<f64>,
@@ -41,9 +40,9 @@ pub mod reqwest_private {
     }
 
     // silly helper until varnish-rs provides something more ergonomic
-    fn sob_helper(sob: StrOrBytes) -> &str {
+    fn sob_helper<'a>(sob: &'a StrOrBytes) -> &'a str {
         match sob {
-            StrOrBytes::Bytes(_) => panic!("{:?} isn't a string", sob),
+            StrOrBytes::Bytes(_) => panic!("{sob:?} isn't a string"),
             StrOrBytes::Utf8(s) => s,
         }
     }
@@ -57,15 +56,16 @@ pub mod reqwest_private {
 
             let bereq = ctx.http_bereq.as_ref().unwrap();
 
-            let bereq_url = sob_helper(bereq.url().unwrap());
+            let sob = bereq.url().unwrap();
+            let bereq_url = sob_helper(&sob);
 
             let url = if let Some(base_url) = &self.base_url {
                 // if the client has a base_url, prepend it to bereq.url
-                format!("{}{}", base_url, bereq_url)
+                format!("{base_url}{bereq_url}")
             } else if bereq_url.starts_with('/') {
                 // otherwise, if bereq.url looks like a path, try to find a host to build a full URL
                 if let Some(host) = bereq.header("host") {
-                    let host_str = sob_helper(host);
+                    let host_str = sob_helper(&host);
                     format!(
                         "{}://{}{}",
                         if self.https { "https" } else { "http" },
@@ -82,7 +82,7 @@ pub mod reqwest_private {
 
             let (req_body_tx, body) = hyper::body::Body::channel();
             let req = Request {
-                method: sob_helper(bereq.method().unwrap()).to_string(),
+                method: sob_helper(&bereq.method().unwrap()).to_string(),
                 url,
                 client: self.client.clone(),
                 body: ReqBody::Stream(body),
@@ -111,9 +111,10 @@ pub mod reqwest_private {
                     if ptr.is_null() || l == 0 {
                         return 0;
                     }
-                    let body_chan = (priv_ as *mut BodyChan).as_mut().unwrap();
-                    let buf = std::slice::from_raw_parts(ptr as *const u8, l as usize);
-                    let bytes = hyper::body::Bytes::copy_from_slice(buf);
+                    let body_chan = priv_.cast::<BodyChan>().as_mut().unwrap();
+                    #[expect(clippy::cast_sign_loss)]
+                    let buf = std::slice::from_raw_parts(ptr.cast::<u8>(), l as usize);
+                    let bytes = Bytes::copy_from_slice(buf);
 
                     body_chan
                         .rt
@@ -127,7 +128,7 @@ pub mod reqwest_private {
                     chan: req_body_tx,
                     rt: &(*self.bgt).rt,
                 }));
-                let p = bcp as *mut c_void;
+                let p = bcp.cast::<c_void>();
                 // mimicking V1F_SendReq in varnish-cache
                 let bo = ctx.raw.bo.as_mut().unwrap();
 
@@ -143,7 +144,7 @@ pub mod reqwest_private {
                     );
 
                     if (*bo.req).req_body_status != BS_CACHED.as_ptr() {
-                        bo.no_retry = c"req.body not cached".as_ptr() as *const c_char;
+                        bo.no_retry = c"req.body not cached".as_ptr();
                     }
 
                     if (*bo.req).req_body_status == BS_ERROR.as_ptr() {
@@ -161,16 +162,16 @@ pub mod reqwest_private {
             let resp = match resp_rx.blocking_recv().unwrap() {
                 RespMsg::Hdrs(resp) => resp,
                 RespMsg::Err(e) => return Err(e.to_string().into()),
-                _ => unreachable!(),
+                RespMsg::Chunk(_) => unreachable!(),
             };
             let beresp = ctx.http_beresp.as_mut().unwrap();
-            beresp.set_status(resp.status as u16);
+            beresp.set_status(u16::try_from(resp.status).unwrap());
             beresp.set_proto("HTTP/1.1")?;
             for (k, v) in &resp.headers {
                 beresp.set_header(
                     k.as_str(),
                     v.to_str().map_err(|e| {
-                        <std::string::String as Into<VclError>>::into(e.to_string())
+                        <String as Into<VclError>>::into(e.to_string())
                     })?,
                 )?;
             }
@@ -178,8 +179,23 @@ pub mod reqwest_private {
                 bytes: None,
                 cursor: 0,
                 chan: Some(resp_rx),
-                content_length: resp.content_length.map(|s| s as usize),
+                content_length: resp.content_length.map(|s| usize::try_from(s).unwrap()),
             }))
+        }
+
+        fn healthy(&self, _ctx: &mut Ctx<'_>) -> (bool, SystemTime) {
+            let probe_state = match self.probe_state {
+                None => return (true, SystemTime::UNIX_EPOCH),
+                Some(ref ps) => ps,
+            };
+
+            assert!(probe_state.spec.window <= 64);
+
+            let bitmap = probe_state.history.load(Ordering::Relaxed);
+            (
+                is_healthy(bitmap, probe_state.spec.window, probe_state.spec.threshold),
+                probe_state.health_changed,
+            )
         }
 
         fn event(&self, event: Event) {
@@ -196,7 +212,7 @@ pub mod reqwest_private {
                 Event::Warm => {
                     spawn_probe(
                         unsafe { &*self.bgt },
-                        probe_state as *const ProbeState as *mut ProbeState,
+                        std::ptr::from_ref::<ProbeState>(probe_state).cast_mut(),
                         self.name.clone(),
                     );
                 }
@@ -206,21 +222,6 @@ pub mod reqwest_private {
                 }
                 _ => {}
             }
-        }
-
-        fn healthy(&self, _ctx: &mut Ctx<'_>) -> (bool, SystemTime) {
-            let probe_state = match self.probe_state {
-                None => return (true, SystemTime::UNIX_EPOCH),
-                Some(ref ps) => ps,
-            };
-
-            assert!(probe_state.spec.window <= 64);
-
-            let bitmap = probe_state.history.load(Ordering::Relaxed);
-            (
-                is_healthy(bitmap, probe_state.spec.window, probe_state.spec.threshold),
-                probe_state.health_changed,
-            )
         }
 
         fn list(&self, ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>, detailed: bool, json: bool) {
@@ -334,11 +335,11 @@ pub mod reqwest_private {
                         Some(RespMsg::Hdrs(_)) => panic!("invalid message type: RespMsg::Hdrs"),
                         Some(RespMsg::Chunk(bytes)) => {
                             self.bytes = Some(bytes);
-                            self.cursor = 0
+                            self.cursor = 0;
                         }
                         Some(RespMsg::Err(e)) => return Err(e.to_string().into()),
                         None => return Ok(n),
-                    };
+                    }
                 }
                 let pull_buf = self.bytes.as_ref().unwrap();
                 let to_write = &pull_buf[self.cursor..];
@@ -385,7 +386,7 @@ pub mod reqwest_private {
         pub vcl: bool,
     }
 
-    use ::reqwest::header::HeaderMap;
+    use reqwest::header::HeaderMap;
 
     // calling reqwest::Response::body() consumes the object, so we keep a copy of the interesting bits
     // in this struct
@@ -466,7 +467,7 @@ pub mod reqwest_private {
             Ok(resp) => resp,
         };
         let mut beresp = Response {
-            status: resp.status().as_u16() as i64,
+            status: i64::from(resp.status().as_u16()),
             headers: resp.headers().clone(),
             content_length: resp.content_length(),
             body: None,
@@ -516,7 +517,7 @@ pub mod reqwest_private {
         probe_ok: bool,
     ) -> (u64, bool, bool) {
         let old_health = is_healthy(bitmap, window, threshold);
-        let new_bit = if probe_ok { 1 } else { 0 };
+        let new_bit = u64::from(probe_ok);
         bitmap = bitmap.wrapping_shl(1) | new_bit;
         let new_health = is_healthy(bitmap, window, threshold);
         (bitmap, new_health, new_health == old_health)
@@ -524,8 +525,8 @@ pub mod reqwest_private {
 
     // cheating hard with the pointer here, but the be_event function will stop us
     // before the references are invalid
-    fn spawn_probe(bgt: &'static BgThread, probe_statep: *mut ProbeState, name: String) {
-        let probe_state = unsafe { probe_statep.as_mut().unwrap() };
+    fn spawn_probe(bgt: &'static BgThread, probe_state: *mut ProbeState, name: String) {
+        let probe_state = unsafe { probe_state.as_mut().unwrap() };
         let spec = probe_state.spec.clone();
         let url = probe_state.url.clone();
         let history = &probe_state.history;
@@ -553,17 +554,17 @@ pub mod reqwest_private {
                         let start = Instant::now();
                         match resp.await {
                             Err(e) => {
-                                msg = format!("Error: {}", e);
+                                msg = format!("Error: {e}");
                                 false
                             }
-                            Ok(resp) if resp.status().as_u16() as u32 == spec.exp_status => {
+                            Ok(resp) if u32::from(resp.status().as_u16()) == spec.exp_status => {
                                 msg = format!("Success: {}", resp.status().as_u16());
                                 if avg_rate < 4.0 {
                                     avg_rate += 1.0;
                                 }
                                 time = start.elapsed().as_secs_f64();
-                                let mut _avg = avg.lock().unwrap();
-                                *_avg += (time - *_avg) / avg_rate;
+                                let mut avg = avg.lock().unwrap();
+                                *avg += (time - *avg) / avg_rate;
                                 true
                             }
                             Ok(resp) => {
@@ -628,10 +629,10 @@ pub mod reqwest_private {
         probe.initial = std::cmp::min(probe.initial, probe.threshold);
         let spec_url = match probe.request {
             ProbeRequest::Url(ref u) => u,
-            _ => return Err(VclError::new("can't use a probe without .url".to_string())),
+            ProbeRequest::Text(_) => return Err(VclError::new("can't use a probe without .url".to_string())),
         };
         let url = if let Some(base_url) = base_url {
-            let full_url = format!("{}{}", base_url, spec_url);
+            let full_url = format!("{base_url}{spec_url}");
             Url::parse(&full_url).map_err(|e| {
                 VclError::new(format!("problem with probe endpoint {full_url} ({e})"))
             })?
@@ -647,7 +648,7 @@ pub mod reqwest_private {
         Ok(ProbeState {
             spec: probe,
             history: AtomicU64::new(0),
-            health_changed: std::time::SystemTime::now(),
+            health_changed: SystemTime::now(),
             join_handle: None,
             url,
             avg: Mutex::new(0_f64),
@@ -655,16 +656,16 @@ pub mod reqwest_private {
     }
 
     impl client {
-        pub fn vcl_send(&self, bgt: &BgThread, t: &mut VclTransaction) {
+        pub fn vcl_send(bgt: &BgThread, t: &mut VclTransaction) {
             let old_t = std::mem::replace(t, VclTransaction::Transition);
             *t = VclTransaction::Sent(bgt.spawn_req(old_t.into_req()));
         }
 
-        pub fn wait_on(&self, bgt: &BgThread, t: &mut VclTransaction) {
+        pub fn wait_on(bgt: &BgThread, t: &mut VclTransaction) {
             match t {
                 VclTransaction::Req(_) => {
-                    self.vcl_send(bgt, t);
-                    self.wait_on(bgt, t)
+                    Self::vcl_send(bgt, t);
+                    Self::wait_on(bgt, t);
                 }
                 VclTransaction::Sent(rx) => {
                     *t = match rx.blocking_recv().unwrap() {
@@ -709,7 +710,7 @@ pub mod reqwest_private {
             name: &'a str,
         ) -> VclResult<Result<&'a Response, VclError>> {
             let t = self.get_transaction(vp_task, name)?;
-            self.wait_on(vp_vcl.as_ref().unwrap(), t);
+            Self::wait_on(vp_vcl.as_ref().unwrap(), t);
             Ok(t.unwrap_resp())
         }
     }

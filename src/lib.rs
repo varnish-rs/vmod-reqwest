@@ -17,7 +17,7 @@ mod reqwest {
     use varnish::ffi::{VCL_BACKEND, VCL_STRING};
     use varnish::vcl::{Backend, Ctx, Event, IntoVCL, Probe, VclError};
 
-    use crate::implementation::reqwest_private::*;
+    use crate::implementation::reqwest_private::{BgThread, Entry, ReqBody, Request, RespMsg, VCLBackend, VclTransaction, build_probe_state, client, process_req};
 
     impl client {
         #[allow(clippy::too_many_arguments)]
@@ -29,6 +29,7 @@ mod reqwest {
         /// - otherwise, the URL is `http(s)://` + `bereq.http.host` + `bereq.url`, using `https` to decide on the scheme (will fail if there's no bereq.http.host)
         ///
         /// `base_url` and `https` are mutually exclusive and can't be specified together.
+        #[expect(clippy::fn_params_excessive_bools)]
         pub fn new(
             ctx: &mut Ctx,
             #[vcl_name] vcl_name: &str,
@@ -95,7 +96,7 @@ mod reqwest {
             if follow <= 0 {
                 rcb = rcb.redirect(reqwest::redirect::Policy::none());
             } else {
-                rcb = rcb.redirect(reqwest::redirect::Policy::limited(follow as usize));
+                rcb = rcb.redirect(reqwest::redirect::Policy::limited(usize::try_from(follow).unwrap()));
             }
             let reqwest_client = rcb.build().map_err(|e| {
                 VclError::new(format!("reqwest: couldn't initialize {vcl_name} ({e})"))
@@ -123,7 +124,7 @@ mod reqwest {
                     client: reqwest_client,
                     probe_state,
                     https: https.unwrap_or(false),
-                    base_url: base_url.map(|s| s.into()),
+                    base_url: base_url.map(Into::into),
                 },
                 has_probe,
             )?;
@@ -167,7 +168,7 @@ mod reqwest {
                 None => ts.push(Entry {
                     transaction: t,
                     req_name: name.to_owned(),
-                    client_name: self.name.to_owned(),
+                    client_name: self.name.clone(),
                 }),
                 Some(e) => e.transaction = t,
             }
@@ -188,7 +189,7 @@ mod reqwest {
             let t = self.get_transaction(vp_task, name)?;
 
             if matches!(t, VclTransaction::Req(_)) {
-                self.vcl_send(vp_vcl.as_ref().unwrap(), t);
+                Self::vcl_send(vp_vcl.as_ref().unwrap(), t);
                 Ok(())
             } else {
                 Err(name.into())
@@ -239,10 +240,7 @@ mod reqwest {
             /// request handle
             name: &str,
         ) -> Result<(), Box<dyn Error>> {
-            let req = match self.get_transaction(vp_task, name)? {
-                VclTransaction::Req(req) => req,
-                _ => return Err(name.into()),
-            };
+            let VclTransaction::Req(req) = self.get_transaction(vp_task, name)? else { return Err(name.into()) };
             // XXX: we'll always have one of those, but maybe people would want
             // `req_top`, or even `bereq` while in `vcl_pipe`?
             let vcl_req = ctx.http_req.as_ref().or(ctx.http_bereq.as_ref()).unwrap();
@@ -357,7 +355,7 @@ mod reqwest {
     pub fn event(
         #[shared_per_vcl] vp_vcl: &mut Option<Box<BgThread>>,
         event: Event,
-    ) -> Result<(), Box<dyn Error>> {
+    ) {
         // we only need to worry about Load, BgThread will be destroyed with the VPriv when the VCL is
         // discarded
         if let Event::Load = event {
@@ -374,6 +372,5 @@ mod reqwest {
             });
             *vp_vcl = Some(Box::new(BgThread { rt, sender }));
         }
-        Ok(())
     }
 }
