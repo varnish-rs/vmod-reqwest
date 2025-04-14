@@ -18,8 +18,10 @@ jobs:
       fail-fast: false  # 7.6 is not yet supported properly. Once fixed, this can be set to true
       matrix:
         include:
+          # default version is set in the justfile. If setup is blank, will use default
+          - type: latest
+          # - setup: varnish77  -- this is current latest
           - setup: varnish76
-          - setup: varnish77
     env:
       RUST_BACKTRACE: 1
       RUSTDOCFLAGS: -D warnings
@@ -28,13 +30,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with: { tool: just }
       - uses: actions/checkout@v4
-      - name: Ensure this crate has not yet been published (on release)
-        if: github.event_name == 'release'
+      - if: github.event_name == 'release'
+        name: Ensure this crate has not yet been published (on release)
         run: just check-if-published
-      - uses: Swatinem/rust-cache@v2
-        if: github.event_name != 'release' && github.event_name != 'workflow_dispatch'
-      - name: install varnish-dev
-        run: |
-          curl -s https://packagecloud.io/install/repositories/varnishcache/${{ matrix.setup }}/script.deb.sh | sudo bash
-          sudo apt-get install -y varnish-dev
+      - if: github.event_name != 'release' && github.event_name != 'workflow_dispatch'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ${{ matrix.setup }}-${{ matrix.latest }}
+      - run: just install-varnish ${{ matrix.setup }}
       - run: just -v ci-test
