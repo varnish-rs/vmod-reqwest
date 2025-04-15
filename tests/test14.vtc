@@ -4,14 +4,14 @@ server s1 {
         rxreq
         txresp
 } -start
-        
+
 varnish v1 -vcl+backend {
         import reqwest from "${vmod}";
 
-        sub vcl_init {   
+        sub vcl_init {
                 new client = reqwest.client();
         }
-        
+
         sub vcl_recv {
                 client.init("s1", "http://${s1_addr}:${s1_port}/my/url");
                 client.copy_headers_to_req(s1);
@@ -20,13 +20,13 @@ varnish v1 -vcl+backend {
         }
 } -start
 varnish v1 -cliok "param.set debug +syncvsl"
-         
+
 client c1 {
         send "GET / HTTP/1.1\r\n"
         send "Host: "
         sendhex "A7"
         send "\r\n"
         send "\r\n"
-                                             
-        rxresp       
+
+        rxresp
 } -run
