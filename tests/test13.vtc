@@ -1,4 +1,4 @@
-varnishtest "npmjs.org"
+varnishtest "large chunked response"
 
 server s1 {
 	txresp -nolen -hdr "Transfer-encoding: chunked"
