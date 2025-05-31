@@ -3,53 +3,13 @@
 @_default:
     just --list
 
-# Clean all build artifacts
-clean:
-    cargo clean
-
-# Update dependencies, including breaking changes
-update:
-    cargo +nightly -Z unstable-options update --breaking
-    cargo update
-
-# Run cargo clippy
-clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
-
-# Test code formatting
-test-fmt:
-    cargo fmt --all -- --check
-
-# Run cargo fmt
-fmt:
-    cargo +nightly fmt -- --config imports_granularity=Module,group_imports=StdExternalCrate
-
-# Build and open code documentation
-docs:
-    cargo doc --no-deps --open
-
-# Quick compile
-check:
-    cargo check --all-targets --workspace
-
 # Default build
 build:
     cargo build --all-targets --workspace
 
-# Run all tests
-test *ARGS: build
-    cargo test --all-targets --workspace {{ARGS}}
-
-# Find unused dependencies. Install it with `cargo install cargo-udeps`
-udeps:
-    cargo +nightly udeps --all-targets --workspace
-
-rust-info:
-    rustc --version
-    cargo --version
-
-# Run all tests as expected by CI
-ci-test: rust-info test-fmt clippy test
+# Quick compile
+check:
+    cargo check --all-targets --workspace
 
 # Verify that the current version of the crate is not the same as the one published on crates.io
 check-if-published CRATE_NAME="vmod-reqwest":
@@ -65,6 +25,50 @@ check-if-published CRATE_NAME="vmod-reqwest":
     else
         echo "The current crate version has not yet been published."
     fi
+
+# Run all tests as expected by CI
+ci-test: rust-info test-fmt clippy test
+
+# Clean all build artifacts
+clean:
+    cargo clean
+
+# Run cargo clippy
+clippy:
+    cargo clippy --workspace --all-targets -- -D warnings
+
+docker-run-latest *ARGS: (docker-build-ver "latest") (docker-run-ver "latest" ARGS)
+docker-run-77 *ARGS: (docker-build-ver "77") (docker-run-ver "77" ARGS)
+docker-run-76 *ARGS: (docker-build-ver "76") (docker-run-ver "76" ARGS)
+
+# Build and open code documentation
+docs:
+    cargo doc --no-deps --open
+
+# Run cargo fmt
+fmt:
+    cargo +nightly fmt -- --config imports_granularity=Module,group_imports=StdExternalCrate
+
+rust-info:
+    rustc --version
+    cargo --version
+
+# Run all tests
+test *ARGS: build
+    cargo test --all-targets --workspace {{ARGS}}
+
+# Test code formatting
+test-fmt:
+    cargo fmt --all -- --check
+
+# Find unused dependencies. Install it with `cargo install cargo-udeps`
+udeps:
+    cargo +nightly udeps --all-targets --workspace
+
+# Update dependencies, including breaking changes
+update:
+    cargo +nightly -Z unstable-options update --breaking
+    cargo update
 
 [private]
 docker-build-ver VERSION:
@@ -86,10 +90,6 @@ docker-run-ver VERSION *ARGS:
         -v "$PWD/docker/.cache/{{VERSION}}:/home/user/.cache" \
         -v "$PWD/docker/.cache/{{VERSION}}/.bash_history:/home/user/.bash_history" \
         varnish-img-{{VERSION}} {{ARGS}}
-
-docker-run-latest *ARGS: (docker-build-ver "latest") (docker-run-ver "latest" ARGS)
-docker-run-77 *ARGS: (docker-build-ver "77") (docker-run-ver "77" ARGS)
-docker-run-76 *ARGS: (docker-build-ver "76") (docker-run-ver "76" ARGS)
 
 # Install Varnish from packagecloud.io. This could be damaging to your system - use with caution.
 [private]
