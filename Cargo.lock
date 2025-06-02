@@ -110,9 +110,9 @@ dependencies = [
 
 [[package]]
 name = "bindgen_helpers"
-version = "0.3.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e7bc40eac7d88d3944b4acd7bdf972a2078e7881d1848d85ec8892776b26572"
+checksum = "bfc5daea6567b928b8e73c1cb755814458ce6f722ea5589bd2becb095b62ca87"
 dependencies = [
  "bindgen",
  "convert_case",
@@ -1510,9 +1510,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "varnish"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64c0b95fb2df4a22a3fd8b30c312ca42f31a90f0d14c5cd748ec9e6365aa753f"
+checksum = "ac2d3ae929e2cb31c409af8e1844618cae108b0dd98bc918a0ca7ed4aadcee01"
 dependencies = [
  "glob",
  "varnish-macros",
@@ -1521,9 +1521,9 @@ dependencies = [
 
 [[package]]
 name = "varnish-macros"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f63a34c48fe940f60c120761e77d4544b4671b5c96c45443296ad571e6a0c7e"
+checksum = "a32c7431c890de56c98fb0cefaa1f4e50d61842ae2e0b3a504f8b9e7febe6b00"
 dependencies = [
  "darling",
  "prettyplease",
@@ -1538,9 +1538,9 @@ dependencies = [
 
 [[package]]
 name = "varnish-sys"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6c9e2894f1071cddc71135650ef4a10c212fb6789e4f1ec9e26aa7099fe85ed"
+checksum = "3e924a3a8307ec40db2b4ed767ddb98fddc4ccc3806bbb294fe994cdf699dbd1"
 dependencies = [
  "bindgen_helpers",
  "cc",
@@ -1564,7 +1564,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vmod_reqwest"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "bytes",
