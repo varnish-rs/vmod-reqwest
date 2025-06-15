@@ -37,10 +37,6 @@ bless-all:
 build:
     cargo build --workspace --all-targets {{features_flag}}
 
-# build all
-build-all-features:
-    cargo build --workspace --all-targets {{features_flag}} --features "ffi"
-
 # Quick compile without building a binary
 check:
     cargo check --workspace --all-targets {{features_flag}}
@@ -52,7 +48,7 @@ ci-coverage: env-info && \
     mkdir -p target/llvm-cov
 
 # Run all tests as expected by CI
-ci-test: env-info test-fmt build-all-features clippy test && assert-git-is-clean
+ci-test: env-info test-fmt build clippy test && assert-git-is-clean
 
 # Run tests only relevant to the latest Varnish version
 ci-test-latest: ci-test test-doc
