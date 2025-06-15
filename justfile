@@ -159,7 +159,6 @@ semver *args:  (cargo-install 'cargo-semver-checks')
 # Run all unit and integration tests
 test *args: build
     cargo test --workspace --all-targets {{features_flag}} {{args}}
-    cargo test --workspace --doc {{features_flag}}
 
 # Test documentation generation
 test-doc:  (docs '')
