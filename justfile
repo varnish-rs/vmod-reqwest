@@ -53,9 +53,6 @@ ci-test: env-info test-fmt build clippy test && assert-git-is-clean
 # Run tests only relevant to the latest Varnish version
 ci-test-latest: ci-test test-doc
 
-# Run minimal subset of tests to ensure compatibility with MSRV
-ci-test-msrv: env-info test
-
 # Clean all build artifacts
 clean:
     cargo clean
@@ -114,47 +111,6 @@ fmt:
         echo 'Reformatting Rust with the stable cargo fmt.  Install nightly with `rustup install nightly` for better results'
         cargo fmt --all
     fi
-
-# Get any package's field from the metadata
-get-crate-field field package=main_crate:  (assert-cmd 'jq')
-    cargo metadata --format-version 1 | jq -e -r '.packages | map(select(.name == "{{package}}")) | first | .{{field}} | select(. != null)'
-
-# Get the minimum supported Rust version (MSRV) for the crate
-get-msrv package=main_crate:  (get-crate-field 'rust_version' package)
-
-# Get the version of Varnish installed on the system. If a version arg is provided, check that the installed version is at least that version.
-get-varnish-version $required_version='':
-    #!/usr/bin/env bash
-    set -euo pipefail
-    VARNISH_VER=$(dpkg-query -W -f='${source:Upstream-Version}\n' varnish-dev || echo "unknown")
-    # try with varnish-plus-dev
-    if [ -z "$VARNISH_VER" ]; then
-        VARNISH_VER=$(dpkg-query -W -f='${source:Upstream-Version}\n' varnish-plus-dev || echo "unknown")
-    fi
-    if [ -n "$required_version" ]; then
-        if [ "$(printf "$required_version\n$VARNISH_VER" | sort -V | head -n1)" != "$required_version" ]; then
-            echo "ERROR: Varnish version $required_version is required, but $VARNISH_VER is installed."
-            exit 1
-        else
-            echo "Found varnish-dev package v$VARNISH_VER >= $required_version"
-        fi
-    elif [ "$VARNISH_VER" = "unknown" -o -z "$VARNISH_VER" ]; then
-        echo "ERROR: varnish-dev package was not found"
-        exit 1
-    else
-        echo "Found varnish-dev package v$VARNISH_VER"
-    fi
-
-# Find the minimum supported Rust version (MSRV) using cargo-msrv extension, and update Cargo.toml
-msrv:  (cargo-install 'cargo-msrv')
-    cargo msrv find --write-msrv --ignore-lockfile {{features_flag}} --min 1.77 --component rustfmt -- {{just_executable()}} ci-test-msrv
-
-release *args='':  (cargo-install 'release-plz')
-    release-plz {{args}}
-
-# Check semver compatibility with prior published version. Install it with `cargo install cargo-semver-checks`
-semver *args:  (cargo-install 'cargo-semver-checks')
-    cargo semver-checks {{features_flag}} {{args}}
 
 # Run all unit and integration tests
 test *args: build

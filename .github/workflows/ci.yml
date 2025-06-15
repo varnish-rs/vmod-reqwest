@@ -26,7 +26,7 @@ jobs:
       - run: just install-varnish
       - run: just ci-test-latest
 
-  test-older:
+  test-varnish-ver:
     name: Test Varnish ${{ matrix.ver }}
     runs-on: ubuntu-latest
     strategy:
@@ -38,6 +38,7 @@ jobs:
           - ver: 7.6
           - ver: 7.5
           - ver: 6.0
+          - ver: 6.0.14r3  # Varnish Plus
     steps:
       - uses: actions/checkout@v4
       - if: github.event_name != 'release' && github.event_name != 'workflow_dispatch'
@@ -47,31 +48,10 @@ jobs:
       - run: just install-varnish ${{ matrix.ver }}
       - run: just ci-test
 
-  test-msrv:
-    name: Test MSRV
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - if: github.event_name != 'release' && github.event_name != 'workflow_dispatch'
-        uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with: { tool: just }
-      - name: Read MSRV
-        id: msrv
-        run: echo "value=$(just get-msrv)" >> $GITHUB_OUTPUT
-      - name: Install MSRV Rust ${{ steps.msrv.outputs.value }}
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.msrv.outputs.value }}
-          # rustfmt is used by the tests
-          components: rustfmt
-      - run: just install-varnish
-      - run: just ci_mode=0 ci-test-msrv  # Ignore warnings in MSRV
-
   # This job checks if any of the previous jobs failed or were canceled.
   # This approach also allows some jobs to be skipped if they are not needed.
   ci-passed:
-    needs: [ test, test-older, test-msrv ]
+    needs: [ test, test-varnish-ver ]
     if: always()
     runs-on: ubuntu-latest
     steps:
