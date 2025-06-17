@@ -36,8 +36,6 @@ jobs:
           - ver: 7.7.0
           - ver: 7.6
           - ver: 7.5
-    steps:
-      - uses: actions/checkout@v4
       - if: github.event_name != 'release' && github.event_name != 'workflow_dispatch'
         uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
