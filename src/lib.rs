@@ -18,8 +18,8 @@ mod reqwest {
     use varnish::vcl::{Backend, Ctx, Event, IntoVCL, Probe, VclError};
 
     use crate::implementation::reqwest_private::{
-        build_probe_state, client, process_req, BgThread, Entry, ReqBody, Request, RespMsg,
-        VCLBackend, VclTransaction,
+        build_probe_state, client, process_req, BgThread, Entry, Request, RespMsg, VCLBackend,
+        VclTransaction,
     };
 
     impl client {
@@ -27,7 +27,7 @@ mod reqwest {
         /// Create a `client` object that can be used both for backend requests and in-vcl requests and will pool connections across them all. All arguments are optional.
         ///
         /// `base_url` and `https`: dictates how the URL of a backend request is built:
-        /// - if `base_url` is specified, the full URL used is `base_url` + `bereq.url`, which means `base_url` nees to specify a scheme (e.g. `http://`) and a host (e.g. `www.example.com).
+        /// - if `base_url` is specified, the full URL used is `base_url` + `bereq.url`, which means `base_url` nees to specify a scheme (e.g. `http://`) and a host (e.g. `www.example.com`).
         /// - otherwise, if `bereq.url`, doesn't start with a `/`, use it as-is
         /// - otherwise, the URL is `http(s)://` + `bereq.http.host` + `bereq.url`, using `https` to decide on the scheme (will fail if there's no bereq.http.host)
         ///
@@ -125,7 +125,7 @@ mod reqwest {
                 vcl_name,
                 VCLBackend {
                     name: vcl_name.to_string(),
-                    bgt: &**vp_vcl.as_ref().unwrap(),
+                    bgt: &raw const **vp_vcl.as_ref().unwrap(),
                     client: reqwest_client,
                     probe_state,
                     https: https.unwrap_or(false),
@@ -161,7 +161,7 @@ mod reqwest {
                 method: method.into(),
                 url: url.into(),
                 headers: Vec::new(),
-                body: ReqBody::None,
+                body: None,
                 client: self.be.get_inner().client.clone(),
                 vcl: true,
             });
@@ -230,7 +230,7 @@ mod reqwest {
             body: &str,
         ) -> Result<(), Box<dyn Error>> {
             if let VclTransaction::Req(req) = self.get_transaction(vp_task, name)? {
-                req.body = ReqBody::Full(Vec::from(body));
+                req.body = Some(Vec::from(body).into());
                 Ok(())
             } else {
                 Err(name.into())
