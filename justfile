@@ -60,7 +60,7 @@ coverage *args='--no-clean --open':  (cargo-install 'cargo-llvm-cov')
     export LLVM_PROFILE_FILE="varnish-%p-%m.profraw"
     export RUSTFLAGS="-Cinstrument-coverage"
     cargo build --workspace --all-targets {{features_flag}}
-    cargo test --workspace --all-targets {{features_flag}}
+    VARNISHTEST_DURATION=10 cargo test --workspace --all-targets {{features_flag}}
     grcov . -s . --binary-path ./target/debug/ -t html --branch --ignore-not-existing -o ./target/debug/coverage/
     open ./target/debug/coverage/index.html
     #
@@ -98,7 +98,7 @@ fmt:
 
 # Run all unit and integration tests
 test *args: build
-    cargo test --workspace --all-targets {{features_flag}} {{args}}
+    VARNISHTEST_DURATION=10 cargo test --workspace --all-targets {{features_flag}} {{args}}
 
 # Test documentation generation
 test-doc:  (docs '')
