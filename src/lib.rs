@@ -112,7 +112,12 @@ mod reqwest {
             }
 
             let probe_state = match probe {
-                Some(spec) => Some(build_probe_state(spec, base_url).map_err(|e| {
+                Some(spec) => Some(build_probe_state(
+                    spec,
+                    base_url,
+                    accept_invalid_certs,
+                    accept_invalid_hostnames,
+                ).map_err(|e| {
                     VclError::new(format!("reqwest: failed to add probe to {vcl_name} ({e})"))
                 })?),
                 None => None,

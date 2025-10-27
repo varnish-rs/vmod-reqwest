@@ -23,6 +23,8 @@ pub mod reqwest_private {
         url: Url,
         join_handle: Option<tokio::task::JoinHandle<()>>,
         avg: Mutex<f64>,
+        accept_invalid_certs: bool,
+        accept_invalid_hostnames: bool,
     }
     #[allow(non_camel_case_types)]
     pub struct client {
@@ -213,6 +215,8 @@ pub mod reqwest_private {
                         unsafe { &*self.bgt },
                         std::ptr::from_ref::<ProbeState>(probe_state).cast_mut(),
                         self.name.clone(),
+                        probe_state.accept_invalid_certs,
+                        probe_state.accept_invalid_hostnames,
                     );
                 }
                 Event::Cold => {
@@ -515,7 +519,13 @@ pub mod reqwest_private {
 
     // cheating hard with the pointer here, but the be_event function will stop us
     // before the references are invalid
-    fn spawn_probe(bgt: &'static BgThread, probe_state: *mut ProbeState, name: String) {
+    fn spawn_probe(
+        bgt: &'static BgThread,
+        probe_state: *mut ProbeState,
+        name: String,
+        accept_invalid_certs: bool,
+        accept_invalid_hostnames: bool,
+    ) {
         let probe_state = unsafe { probe_state.as_mut().unwrap() };
         let spec = probe_state.spec.clone();
         let url = probe_state.url.clone();
@@ -533,6 +543,8 @@ pub mod reqwest_private {
                 let mut time = 0_f64;
                 let new_bit = match reqwest::ClientBuilder::new()
                     .timeout(spec.timeout)
+                    .danger_accept_invalid_certs(accept_invalid_certs)
+                    .danger_accept_invalid_hostnames(accept_invalid_hostnames)
                     .build()
                     .map(|req| req.get(url.clone()).send())
                 {
@@ -596,6 +608,8 @@ pub mod reqwest_private {
     pub fn build_probe_state(
         mut probe: Probe,
         base_url: Option<&str>,
+        accept_invalid_certs: bool,
+        accept_invalid_hostnames: bool,
     ) -> Result<ProbeState, VclError> {
         // sanitize probe (see vbp_set_defaults in Varnish Cache)
         if probe.timeout.is_zero() {
@@ -644,6 +658,8 @@ pub mod reqwest_private {
             join_handle: None,
             url,
             avg: Mutex::new(0_f64),
+            accept_invalid_certs,
+            accept_invalid_hostnames,
         })
     }
 
