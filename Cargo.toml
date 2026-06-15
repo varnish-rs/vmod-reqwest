@@ -1,7 +1,7 @@
 [package]
 name = "vmod_reqwest"
-version = "0.0.16"
-edition = "2021"
+version = "0.0.18"
+edition = "2024"
 license = "BSD-3-Clause"
 authors = ["Guillaume Quintard <guillaume.quintard@gmail.com>"]
 publish = false
@@ -13,7 +13,7 @@ reqwest = { version = "0.12", features = ["stream", "deflate", "gzip", "brotli",
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1.17"
-varnish = { version = "0.5.5", features = ["ffi"] }
+varnish = { version = "0.7.0", features = ["ffi"] }
 
 [lib]
 crate-type = ["cdylib"]

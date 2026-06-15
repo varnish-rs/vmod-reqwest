@@ -11,15 +11,14 @@ mod reqwest {
     use std::io::Write;
     use std::time::Duration;
 
-    use reqwest::header::HeaderValue;
     use tokio::sync::mpsc::Sender;
     // FIXME: needed for header()
     use varnish::ffi::{VCL_BACKEND, VCL_STRING};
-    use varnish::vcl::{Backend, Ctx, Event, IntoVCL, Probe, VclError};
+    use varnish::vcl::{Backend, Ctx, Event, Probe, VclError};
 
     use crate::implementation::reqwest_private::{
-        build_probe_state, client, process_req, BgThread, Entry, Request, RespMsg, VCLBackend,
-        VclTransaction,
+        BgThread, Entry, Request, RespMsg, VCLBackend, VclTransaction, build_probe_state, client,
+        process_req,
     };
 
     impl client {
@@ -33,6 +32,7 @@ mod reqwest {
         ///
         /// `base_url` and `https` are mutually exclusive and can't be specified together.
         #[expect(clippy::fn_params_excessive_bools)]
+        #[vcl_rename(client)]
         pub fn new(
             ctx: &mut Ctx,
             #[vcl_name] vcl_name: &str,
@@ -83,7 +83,7 @@ mod reqwest {
                 rcb = rcb.connect_timeout(t);
             }
             if let Some(proxy) = http_proxy {
-                rcb = rcb.proxy(reqwest::Proxy::https(proxy).map_err(|e| {
+                rcb = rcb.proxy(reqwest::Proxy::http(proxy).map_err(|e| {
                     VclError::new(format!(
                         "reqwest: couldn't initialize {vcl_name}'s HTTP proxy ({e})"
                     ))
@@ -108,7 +108,9 @@ mod reqwest {
             })?;
 
             if https.is_some() && base_url.is_some() {
-                return Err(VclError::new(format!("reqwest: couldn't initialize {vcl_name}: can't take both an https and a base_url argument")));
+                return Err(VclError::new(format!(
+                    "reqwest: couldn't initialize {vcl_name}: can't take both an https and a base_url argument"
+                )));
             }
 
             let probe_state = match probe {
@@ -297,12 +299,15 @@ mod reqwest {
 
             match (n, sep) {
                 (0, _) => Ok(VCL_STRING::default()),
-                (_, None) => all_headers
-                    .next()
-                    .map(HeaderValue::as_ref)
-                    .into_vcl(&mut ctx.ws),
+                (_, None) => match all_headers.next() {
+                    None => Ok(VCL_STRING::default()),
+                    Some(h) => ctx
+                        .ws
+                        .copy_bytes_with_null(h.as_ref())
+                        .map(|t| VCL_STRING(t.b)),
+                },
                 (_, Some(s)) => {
-                    let mut buf = ctx.ws.slice_builder()?;
+                    let mut buf = ctx.ws.vcl_string_builder()?;
                     for (i, h) in all_headers.enumerate() {
                         if i != 0 {
                             buf.write(s.as_ref())
@@ -312,7 +317,7 @@ mod reqwest {
                         buf.write(h.as_ref())
                             .map_err(|e| VclError::new(e.to_string()))?;
                     }
-                    buf.finish().into_vcl(&mut ctx.ws)
+                    Ok(buf.finish())
                 }
             }
         }
@@ -333,7 +338,10 @@ mod reqwest {
                 Err(_) => Ok(VCL_STRING::default()),
                 Ok(resp) => match resp.body {
                     None => Ok(VCL_STRING::default()),
-                    Some(ref b) => b.into_vcl(&mut ctx.ws),
+                    Some(ref b) => ctx
+                        .ws
+                        .copy_bytes_with_null(b.as_ref())
+                        .map(|t| VCL_STRING(t.b)),
                 },
             }
         }
@@ -354,7 +362,7 @@ mod reqwest {
 
         /// Return a VCL backend built upon the `client` specification
         pub unsafe fn backend(&self) -> VCL_BACKEND {
-            self.be.vcl_ptr()
+            unsafe { self.be.as_ref().vcl_ptr() }
         }
     }
 
