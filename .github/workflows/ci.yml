@@ -34,8 +34,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
+          - ver: 9.0
           - ver: 8.0
-          - ver: 7.7.0
     steps:
       - uses: actions/checkout@v4
       - if: github.event_name != 'release' && github.event_name != 'workflow_dispatch'
