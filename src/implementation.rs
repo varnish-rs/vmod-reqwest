@@ -2,8 +2,8 @@ pub mod reqwest_private {
     use std::boxed::Box;
     use std::io::Write;
     use std::os::raw::{c_uint, c_void};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime};
 
     use anyhow::Error;
@@ -11,10 +11,10 @@ pub mod reqwest_private {
     use reqwest::{Client, Url};
     use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
     use varnish::ffi::{BS_CACHED, BS_ERROR, BS_NONE};
-    use varnish::vcl::{
-        log, Buffer, Ctx, Event, LogTag, Probe, Request as ProbeRequest, VclError, VclResult,
-    };
     use varnish::vcl::{Backend, StrOrBytes, VclBackend, VclResponse};
+    use varnish::vcl::{
+        Buffer, Ctx, Event, LogTag, Probe, Request as ProbeRequest, VclError, VclResult, log,
+    };
 
     pub struct ProbeState {
         spec: Probe,
@@ -60,18 +60,21 @@ pub mod reqwest_private {
                 if ptr.is_null() || l == 0 {
                     return 0;
                 }
-                let body_chan = priv_
-                    .cast::<UnboundedSender<Result<Bytes, String>>>()
-                    .as_mut()
-                    .unwrap();
                 #[expect(clippy::cast_sign_loss)]
-                let buf = std::slice::from_raw_parts(ptr.cast::<u8>(), l as usize);
+                let (body_chan, buf) = unsafe {
+                    let body_chan = priv_
+                        .cast::<UnboundedSender<Result<Bytes, String>>>()
+                        .as_mut()
+                        .unwrap();
+                    let buf = std::slice::from_raw_parts(ptr.cast::<u8>(), l as usize);
+                    (body_chan, buf)
+                };
                 let bytes = Bytes::copy_from_slice(buf);
 
                 body_chan.send(Ok(bytes)).is_err().into()
             }
 
-            if !self.healthy(ctx).0 {
+            if !self.probe(ctx).0 {
                 return Err("unhealthy".into());
             }
 
@@ -184,7 +187,7 @@ pub mod reqwest_private {
             }))
         }
 
-        fn healthy(&self, _ctx: &mut Ctx<'_>) -> (bool, SystemTime) {
+        fn probe(&self, _ctx: &mut Ctx<'_>) -> (bool, SystemTime) {
             let Some(ref probe_state) = self.probe_state else {
                 return (true, SystemTime::UNIX_EPOCH);
             };
@@ -223,90 +226,109 @@ pub mod reqwest_private {
             }
         }
 
-        fn list(&self, ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>, detailed: bool, json: bool) {
-            if self.probe_state.is_none() {
-                let state = if self.healthy(ctx).0 {
+        fn report(&self, _ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
+            let Some(ProbeState {
+                history,
+                spec: Probe {
+                    window, threshold, ..
+                },
+                ..
+            }) = self.probe_state.as_ref()
+            else {
+                return;
+            };
+            let bitmap = history.load(Ordering::Relaxed);
+            vsb.write(&format!(
+                "{}/{}\t{}",
+                good_probes(bitmap, *window),
+                window,
+                if is_healthy(bitmap, *window, *threshold) {
                     "healthy"
                 } else {
                     "sick"
-                };
-                if json {
-                    if detailed {
-                        vsb.write(&"[0, 0, \"").unwrap();
-                        vsb.write(&state).unwrap();
-                        vsb.write(&"\"],").unwrap();
-                    } else {
-                        vsb.write(&"[]").unwrap();
-                    }
-                } else if detailed {
-                    vsb.write(&"0/0\t").unwrap();
-                    vsb.write(&state).unwrap();
                 }
-                return;
-            }
-            let ProbeState {
+            ))
+            .expect("vsb buffer full");
+        }
+
+        fn report_details(&self, ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
+            let Some(ProbeState {
                 history,
                 avg,
                 spec: Probe {
                     window, threshold, ..
                 },
                 ..
-            } = self.probe_state.as_ref().unwrap();
+            }) = self.probe_state.as_ref()
+            else {
+                let state = if self.probe(ctx).0 { "healthy" } else { "sick" };
+                vsb.write(&"0/0\t").expect("vsb buffer full");
+                vsb.write(&state).expect("vsb buffer full");
+                return;
+            };
             let bitmap = history.load(Ordering::Relaxed);
             let window = *window;
             let threshold = *threshold;
-            let health_str = if is_healthy(bitmap, window, threshold) {
-                "healthy"
-            } else {
-                "sick"
-            };
-            let msg = match (json, detailed) {
-                // json, no details
-                (true, false) => {
-                    format!(
-                        "[{}, {}, \"{}\"]",
-                        good_probes(bitmap, window),
-                        window,
-                        health_str,
-                    )
-                }
-                // json, details
-                (true, true) => {
-                    // TODO: talk to upstream, we shouldn't have to add the colon
-                    serde_json::to_string(&self.probe_state.as_ref().unwrap().spec)
-                        .as_ref()
-                        .unwrap()
-                        .to_owned()
-                        + ",\n"
-                }
-                // no json, no details
-                (false, false) => {
-                    format!("{}/{}\t{}", good_probes(bitmap, window), window, health_str)
-                }
-                // no json, details
-                (false, true) => {
-                    let mut s = format!(
-                        "
+            let mut s = format!(
+                "
  Current states  good: {:2} threshold: {:2} window: {:2}
   Average response time of good probes: {:.06}
   Oldest ================================================== Newest
   ",
-                        good_probes(bitmap, window),
-                        threshold,
-                        window,
-                        avg.lock().unwrap()
-                    );
-                    for i in 0..64 {
-                        s += if bitmap.wrapping_shr(63 - i) & 1 == 1 {
-                            "H"
-                        } else {
-                            "-"
-                        };
-                    }
-                    s
-                }
+                good_probes(bitmap, window),
+                threshold,
+                window,
+                avg.lock().expect("avg mutex poisoned")
+            );
+            for i in 0..64 {
+                s += if bitmap.wrapping_shr(63 - i) & 1 == 1 {
+                    "H"
+                } else {
+                    "-"
+                };
+            }
+            vsb.write(&s).expect("vsb buffer full");
+        }
+
+        fn report_json(&self, _ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
+            let Some(ProbeState {
+                history,
+                spec: Probe {
+                    window, threshold, ..
+                },
+                ..
+            }) = self.probe_state.as_ref()
+            else {
+                vsb.write(&"[]").expect("vsb buffer full");
+                return;
             };
-            vsb.write(&msg).unwrap();
+            let bitmap = history.load(Ordering::Relaxed);
+            vsb.write(&format!(
+                "[{}, {}, \"{}\"]",
+                good_probes(bitmap, *window),
+                window,
+                if is_healthy(bitmap, *window, *threshold) {
+                    "healthy"
+                } else {
+                    "sick"
+                }
+            ))
+            .expect("vsb buffer full");
+        }
+
+        fn report_details_json(&self, ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
+            let Some(ref probe_state) = self.probe_state else {
+                let state = if self.probe(ctx).0 { "healthy" } else { "sick" };
+                vsb.write(&"[0, 0, \"").expect("vsb buffer full");
+                vsb.write(&state).expect("vsb buffer full");
+                vsb.write(&"\"],").expect("vsb buffer full");
+                return;
+            };
+            // TODO: talk to upstream, we shouldn't have to add the comma
+            let msg = serde_json::to_string(&probe_state.spec)
+                .expect("probe spec serialization failed")
+                + ",\n";
+            vsb.write(&msg).expect("vsb buffer full");
         }
     }
 
@@ -329,8 +351,10 @@ pub mod reqwest_private {
         fn read(&mut self, mut buf: &mut [u8]) -> VclResult<usize> {
             let mut n = 0;
             loop {
-                if self.bytes.is_none() && self.chan.is_some() {
-                    match self.chan.as_mut().unwrap().blocking_recv() {
+                if self.bytes.is_none()
+                    && let Some(chan) = self.chan.as_mut()
+                {
+                    match chan.blocking_recv() {
                         Some(RespMsg::Hdrs(_)) => panic!("invalid message type: RespMsg::Hdrs"),
                         Some(RespMsg::Chunk(bytes)) => {
                             self.bytes = Some(bytes);
@@ -487,7 +511,7 @@ pub mod reqwest_private {
                         send!(tx, RespMsg::Err(e.into()));
                         return;
                     }
-                };
+                }
             }
         }
     }
@@ -620,7 +644,7 @@ pub mod reqwest_private {
         let spec_url = match probe.request {
             ProbeRequest::Url(ref u) => u,
             ProbeRequest::Text(_) => {
-                return Err(VclError::new("can't use a probe without .url".to_string()))
+                return Err(VclError::new("can't use a probe without .url".to_string()));
             }
         };
         let url = if let Some(base_url) = base_url {
