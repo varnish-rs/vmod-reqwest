@@ -248,7 +248,7 @@ pub mod reqwest_private {
                     "sick"
                 }
             ))
-            .unwrap();
+            .expect("vsb buffer full");
         }
 
         fn report_details(&self, ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
@@ -262,8 +262,8 @@ pub mod reqwest_private {
             }) = self.probe_state.as_ref()
             else {
                 let state = if self.probe(ctx).0 { "healthy" } else { "sick" };
-                vsb.write(&"0/0\t").unwrap();
-                vsb.write(&state).unwrap();
+                vsb.write(&"0/0\t").expect("vsb buffer full");
+                vsb.write(&state).expect("vsb buffer full");
                 return;
             };
             let bitmap = history.load(Ordering::Relaxed);
@@ -278,7 +278,7 @@ pub mod reqwest_private {
                 good_probes(bitmap, window),
                 threshold,
                 window,
-                avg.lock().unwrap()
+                avg.lock().expect("avg mutex poisoned")
             );
             for i in 0..64 {
                 s += if bitmap.wrapping_shr(63 - i) & 1 == 1 {
@@ -287,7 +287,7 @@ pub mod reqwest_private {
                     "-"
                 };
             }
-            vsb.write(&s).unwrap();
+            vsb.write(&s).expect("vsb buffer full");
         }
 
         fn report_json(&self, _ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
@@ -299,7 +299,7 @@ pub mod reqwest_private {
                 ..
             }) = self.probe_state.as_ref()
             else {
-                vsb.write(&"[]").unwrap();
+                vsb.write(&"[]").expect("vsb buffer full");
                 return;
             };
             let bitmap = history.load(Ordering::Relaxed);
@@ -313,24 +313,22 @@ pub mod reqwest_private {
                     "sick"
                 }
             ))
-            .unwrap();
+            .expect("vsb buffer full");
         }
 
         fn report_details_json(&self, ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
             let Some(ref probe_state) = self.probe_state else {
                 let state = if self.probe(ctx).0 { "healthy" } else { "sick" };
-                vsb.write(&"[0, 0, \"").unwrap();
-                vsb.write(&state).unwrap();
-                vsb.write(&"\"],").unwrap();
+                vsb.write(&"[0, 0, \"").expect("vsb buffer full");
+                vsb.write(&state).expect("vsb buffer full");
+                vsb.write(&"\"],").expect("vsb buffer full");
                 return;
             };
             // TODO: talk to upstream, we shouldn't have to add the comma
             let msg = serde_json::to_string(&probe_state.spec)
-                .as_ref()
-                .unwrap()
-                .to_owned()
+                .expect("probe spec serialization failed")
                 + ",\n";
-            vsb.write(&msg).unwrap();
+            vsb.write(&msg).expect("vsb buffer full");
         }
     }
 
