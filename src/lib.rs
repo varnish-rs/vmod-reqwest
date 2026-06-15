@@ -142,7 +142,7 @@ mod reqwest {
             Ok(client)
         }
 
-        /// reate an http request, identifying it by its `name`. The request is local to the VCL task it was created in. If a request already existed with the same name, it it simply dropped and replaced, i.e. it is NOT automatically sent.
+        /// Create an http request, identifying it by its `name`. The request is local to the VCL task it was created in. If a request already existed with the same name, it is simply dropped and replaced, i.e. it is NOT automatically sent.
         pub fn init(
             &self,
             #[shared_per_task] vp_task: &mut Option<Box<Vec<Entry>>>,
@@ -261,7 +261,7 @@ mod reqwest {
             Ok(())
         }
 
-        /// Retrieve the response status (send and wait if necessary), returns 0 if the reponse failed, but will cause a VCL errorif call on a non-existing request.
+        /// Retrieve the response status (send and wait if necessary), returns 0 if the response failed, but will cause a VCL error if call on a non-existing request.
         pub fn status(
             &self,
             #[shared_per_vcl] vp_vcl: Option<&BgThread>,
@@ -271,8 +271,7 @@ mod reqwest {
         ) -> Result<i64, Box<dyn Error>> {
             Ok(self
                 .get_resp(vp_vcl, vp_task, name)?
-                .map(|r| r.status)
-                .unwrap_or(0))
+                .map_or(0, |r| r.status))
         }
 
         /// Retrieve the value of the first header named `key`, or returns NULL if it doesn't exist, or there was a transmission error.

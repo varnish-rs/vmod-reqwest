@@ -351,8 +351,10 @@ pub mod reqwest_private {
         fn read(&mut self, mut buf: &mut [u8]) -> VclResult<usize> {
             let mut n = 0;
             loop {
-                if self.bytes.is_none() && self.chan.is_some() {
-                    match self.chan.as_mut().unwrap().blocking_recv() {
+                if self.bytes.is_none()
+                    && let Some(chan) = self.chan.as_mut()
+                {
+                    match chan.blocking_recv() {
                         Some(RespMsg::Hdrs(_)) => panic!("invalid message type: RespMsg::Hdrs"),
                         Some(RespMsg::Chunk(bytes)) => {
                             self.bytes = Some(bytes);
@@ -509,7 +511,7 @@ pub mod reqwest_private {
                         send!(tx, RespMsg::Err(e.into()));
                         return;
                     }
-                };
+                }
             }
         }
     }

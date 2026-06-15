@@ -60,7 +60,7 @@ HTTPS proxy to send your requests through
 
 ### Method `VOID <object>.init(STRING name, STRING url, STRING method = "GET")`
 
-reate an http request, identifying it by its `name`. The request is local to the VCL task it was created in. If a request already existed with the same name, it it simply dropped and replaced, i.e. it is NOT automatically sent.
+Create an http request, identifying it by its `name`. The request is local to the VCL task it was created in. If a request already existed with the same name, it is simply dropped and replaced, i.e. it is NOT automatically sent.
 
 * `STRING name`:
 handle for the request, it'll be used by other methods to identify the transaction
@@ -109,7 +109,7 @@ request handle
 
 ### Method `INT <object>.status(STRING name)`
 
-Retrieve the response status (send and wait if necessary), returns 0 if the reponse failed, but will cause a VCL errorif call on a non-existing request.
+Retrieve the response status (send and wait if necessary), returns 0 if the response failed, but will cause a VCL error if call on a non-existing request.
 
 * `STRING name`:
 request handle
