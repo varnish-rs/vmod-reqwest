@@ -1,0 +1,55 @@
+varnishtest "probe inherits accept_invalid HTTPS settings"
+
+server s1 {
+    # probe fires immediately after vcl_init
+    tls_handshake
+    rxreq
+    expect req.url == "/probe"
+    txresp
+    close
+    accept
+
+    # regular client request forwarded through the reqwest client (at t≈1.5s)
+    tls_handshake
+    rxreq
+    expect req.url == "/"
+    txresp
+} -start
+
+varnish v1 -arg "-p debug=+syncvsl" -vcl {
+    import reqwest from "${vmod}";
+
+    probe p1 {
+        .url = "/probe";
+        .window = 1;
+        .initial = 0;
+        .threshold = 1;
+        .interval = 5s;
+    }
+
+    backend default none;
+
+    sub vcl_init {
+        new client = reqwest.client(
+            base_url = "https://${s1_addr}:${s1_port}",
+            accept_invalid_certs = true,
+            accept_invalid_hostnames = true,
+            probe = p1
+        );
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = client.backend();
+    }
+} -start
+
+client c1 {
+    # wait for the first probe to succeed — backend should now be healthy
+    delay 1.5
+
+    txreq
+    rxresp
+    expect resp.status == 200
+} -run
+
+server s1 -wait
