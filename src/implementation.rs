@@ -1,7 +1,6 @@
 pub mod reqwest_private {
     use std::boxed::Box;
     use std::io::Write;
-    use std::os::raw::{c_uint, c_void};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime};
@@ -10,11 +9,25 @@ pub mod reqwest_private {
     use bytes::Bytes;
     use reqwest::{Client, Url};
     use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
-    use varnish::ffi::{BS_CACHED, BS_ERROR, BS_NONE};
-    use varnish::vcl::{Backend, StrOrBytes, VclBackend, VclResponse};
+    use varnish::vcl::{Backend, BodyState, StrOrBytes, VclBackend, VclResponse};
     use varnish::vcl::{
         Buffer, Ctx, Event, LogTag, Probe, Request as ProbeRequest, VclError, VclResult, log,
     };
+
+    struct BodySender(UnboundedSender<Result<Bytes, String>>);
+
+    impl Write for BodySender {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .send(Ok(Bytes::copy_from_slice(buf)))
+                .map_err(|_| std::io::Error::other("receiver dropped"))?;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     pub struct ProbeState {
         spec: Probe,
@@ -50,30 +63,6 @@ pub mod reqwest_private {
     #[allow(clippy::extra_unused_lifetimes)]
     impl<'a> VclBackend<BackendResp> for VCLBackend {
         fn get_response(&self, ctx: &mut Ctx<'_>) -> VclResult<Option<BackendResp>> {
-            unsafe extern "C" fn body_send_iterate(
-                priv_: *mut c_void,
-                _flush: c_uint,
-                ptr: *const c_void,
-                l: isize,
-            ) -> i32 {
-                // nothing to do
-                if ptr.is_null() || l == 0 {
-                    return 0;
-                }
-                #[expect(clippy::cast_sign_loss)]
-                let (body_chan, buf) = unsafe {
-                    let body_chan = priv_
-                        .cast::<UnboundedSender<Result<Bytes, String>>>()
-                        .as_mut()
-                        .unwrap();
-                    let buf = std::slice::from_raw_parts(ptr.cast::<u8>(), l as usize);
-                    (body_chan, buf)
-                };
-                let bytes = Bytes::copy_from_slice(buf);
-
-                body_chan.send(Ok(bytes)).is_err().into()
-            }
-
             if !self.probe(ctx).0 {
                 return Err("unhealthy".into());
             }
@@ -116,51 +105,13 @@ pub mod reqwest_private {
                     .collect(),
             };
 
-            unsafe {
-                let bo = ctx.raw.bo.as_mut().unwrap();
-                if !bo.bereq_body.is_null()
-                    || (!bo.req.is_null() && (*bo.req).req_body_status != BS_NONE.as_ptr())
-                {
-                    let (mut req_body_tx, req_body_rx) =
-                        tokio::sync::mpsc::unbounded_channel::<Result<Bytes, String>>();
-                    req.body = Some(reqwest::Body::wrap_stream(
-                        tokio_stream::wrappers::UnboundedReceiverStream::new(req_body_rx),
-                    ));
-                    // manually dropped a few lines below
-                    let p = (&raw mut req_body_tx).cast::<c_void>();
-
-                    // mimicking V1F_SendReq in varnish-cache
-                    if bo.bereq_body.is_null() {
-                        let i = varnish::ffi::VRB_Iterate(
-                            bo.wrk,
-                            bo.vsl.as_mut_ptr(),
-                            bo.req,
-                            Some(body_send_iterate),
-                            p,
-                        );
-
-                        if (*bo.req).req_body_status != BS_CACHED.as_ptr() {
-                            bo.no_retry = c"req.body not cached".as_ptr();
-                        }
-
-                        if (*bo.req).req_body_status == BS_ERROR.as_ptr() {
-                            assert!(i < 0);
-                            (*bo.req).doclose = &raw const varnish::ffi::SC_RX_BODY[0];
-                        }
-
-                        if i < 0 {
-                            return Err("req.body read error".into());
-                        }
-                    } else {
-                        varnish::ffi::ObjIterate(
-                            bo.wrk,
-                            bo.bereq_body,
-                            p,
-                            Some(body_send_iterate),
-                            0,
-                        );
-                    }
-                }
+            if ctx.req_body_state()? != BodyState::None {
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Bytes, String>>();
+                req.body = Some(reqwest::Body::wrap_stream(
+                    tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+                ));
+                ctx.req_body(&mut BodySender(tx))
+                    .map_err(|e| format!("req.body read error: {e}"))?;
             }
             let mut resp_rx = unsafe { (*self.bgt).spawn_req(req) };
 

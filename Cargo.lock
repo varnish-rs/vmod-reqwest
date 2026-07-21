@@ -1798,9 +1798,8 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "varnish"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b83525c8e2200dc7d0db8e485d8bccdf54ff17593c2cbebce81397aeb322e465"
+version = "0.7.1"
+source = "git+https://github.com/varnish-rs/varnish-rs.git?rev=27bab58#27bab58f4c3bfa5b52fa8bfd1a5fe1287d1ec10b"
 dependencies = [
  "glob",
  "varnish-macros",
@@ -1809,9 +1808,8 @@ dependencies = [
 
 [[package]]
 name = "varnish-macros"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f670639c252a95fd46c150fb9e3e38ea1e92b73aa0a3ecca52f0d0e4f491ddf"
+version = "0.7.1"
+source = "git+https://github.com/varnish-rs/varnish-rs.git?rev=27bab58#27bab58f4c3bfa5b52fa8bfd1a5fe1287d1ec10b"
 dependencies = [
  "darling",
  "glob",
@@ -1828,9 +1826,8 @@ dependencies = [
 
 [[package]]
 name = "varnish-sys"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f34ef7aa58328c4d5c32fa19185558db780a25bdf5fb2d7ba0c6b6ac4d8e774"
+version = "0.7.1"
+source = "git+https://github.com/varnish-rs/varnish-rs.git?rev=27bab58#27bab58f4c3bfa5b52fa8bfd1a5fe1287d1ec10b"
 dependencies = [
  "bindgen_helpers",
  "memchr",
