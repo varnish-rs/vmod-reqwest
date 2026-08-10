@@ -17,7 +17,7 @@ mod reqwest {
     use varnish::vcl::{Backend, Ctx, Event, Probe, VclError};
 
     use crate::implementation::reqwest_private::{
-        BgThread, Entry, Request, RespMsg, VCLBackend, VclTransaction, build_probe_state, client,
+        BgThread, Entry, Request, Response, VCLBackend, VclTransaction, build_probe_state, client,
         process_req,
     };
 
@@ -70,40 +70,56 @@ mod reqwest {
             probe: Option<Probe>,
         ) -> Result<Self, VclError> {
             // set some default
-            let mut rcb = reqwest::ClientBuilder::new()
+            let mut vrcb = reqwest::ClientBuilder::new()
+                .brotli(auto_brotli)
+                .deflate(auto_deflate)
+                .gzip(auto_gzip)
+                .danger_accept_invalid_certs(accept_invalid_certs)
+                .danger_accept_invalid_hostnames(accept_invalid_hostnames);
+            let mut brcb = reqwest::blocking::ClientBuilder::new()
                 .brotli(auto_brotli)
                 .deflate(auto_deflate)
                 .gzip(auto_gzip)
                 .danger_accept_invalid_certs(accept_invalid_certs)
                 .danger_accept_invalid_hostnames(accept_invalid_hostnames);
             if let Some(t) = timeout {
-                rcb = rcb.timeout(t);
+                vrcb = vrcb.timeout(t);
+                brcb = brcb.timeout(t);
             }
             if let Some(t) = connect_timeout {
-                rcb = rcb.connect_timeout(t);
+                vrcb = vrcb.connect_timeout(t);
+                brcb = brcb.connect_timeout(t);
             }
             if let Some(proxy) = http_proxy {
-                rcb = rcb.proxy(reqwest::Proxy::http(proxy).map_err(|e| {
+                let proxy = reqwest::Proxy::http(proxy).map_err(|e| {
                     VclError::new(format!(
                         "reqwest: couldn't initialize {vcl_name}'s HTTP proxy ({e})"
                     ))
-                })?);
+                })?;
+                vrcb = vrcb.proxy(proxy.clone());
+                brcb = brcb.proxy(proxy);
             }
             if let Some(proxy) = https_proxy {
-                rcb = rcb.proxy(reqwest::Proxy::https(proxy).map_err(|e| {
+                let proxy = reqwest::Proxy::https(proxy).map_err(|e| {
                     VclError::new(format!(
                         "reqwest: couldn't initialize {vcl_name}'s HTTPS proxy ({e})"
                     ))
-                })?);
+                })?;
+                vrcb = vrcb.proxy(proxy.clone());
+                brcb = brcb.proxy(proxy);
             }
             if follow <= 0 {
-                rcb = rcb.redirect(reqwest::redirect::Policy::none());
+                vrcb = vrcb.redirect(reqwest::redirect::Policy::none());
+                brcb = brcb.redirect(reqwest::redirect::Policy::none());
             } else {
-                rcb = rcb.redirect(reqwest::redirect::Policy::limited(
-                    usize::try_from(follow).unwrap(),
-                ));
+                let n = usize::try_from(follow).unwrap();
+                vrcb = vrcb.redirect(reqwest::redirect::Policy::limited(n));
+                brcb = brcb.redirect(reqwest::redirect::Policy::limited(n));
             }
-            let reqwest_client = rcb.build().map_err(|e| {
+            let vcl_client = vrcb.build().map_err(|e| {
+                VclError::new(format!("reqwest: couldn't initialize {vcl_name} ({e})"))
+            })?;
+            let blocking_client = brcb.build().map_err(|e| {
                 VclError::new(format!("reqwest: couldn't initialize {vcl_name} ({e})"))
             })?;
 
@@ -128,7 +144,8 @@ mod reqwest {
                 VCLBackend {
                     name: vcl_name.to_string(),
                     bgt: &raw const **vp_vcl.as_ref().unwrap(),
-                    client: reqwest_client,
+                    client: vcl_client,
+                    blocking_client,
                     probe_state,
                     https: https.unwrap_or(false),
                     base_url: base_url.map(Into::into),
@@ -165,7 +182,6 @@ mod reqwest {
                 headers: Vec::new(),
                 body: None,
                 client: self.be.get_inner().client.clone(),
-                vcl: true,
             });
 
             match ts
@@ -199,7 +215,7 @@ mod reqwest {
                 Self::vcl_send(vp_vcl.as_ref().unwrap(), t);
                 Ok(())
             } else {
-                Err(name.into())
+                Err(format!("reqwest.send(): request ({name}) already sent").into())
             }
         }
 
@@ -214,12 +230,9 @@ mod reqwest {
             /// header value
             value: &str,
         ) -> Result<(), Box<dyn Error>> {
-            if let VclTransaction::Req(req) = self.get_transaction(vp_task, name)? {
-                req.headers.push((key.into(), value.into()));
-                Ok(())
-            } else {
-                Err(name.into())
-            }
+            let req = self.get_req(vp_task, name)?;
+            req.headers.push((key.into(), value.into()));
+            Ok(())
         }
 
         /// Set the body of the unsent request named `name`. As for `set_header()`, the request must exist and not have been sent.
@@ -231,12 +244,9 @@ mod reqwest {
             /// the body to send
             body: &str,
         ) -> Result<(), Box<dyn Error>> {
-            if let VclTransaction::Req(req) = self.get_transaction(vp_task, name)? {
-                req.body = Some(Vec::from(body).into());
-                Ok(())
-            } else {
-                Err(name.into())
-            }
+            let req = self.get_req(vp_task, name)?;
+            req.body = Some(Vec::from(body).into());
+            Ok(())
         }
 
         /// Copy the native request headers (i.e. `req` or `bereq`) into the request named `name`.
@@ -247,9 +257,7 @@ mod reqwest {
             /// request handle
             name: &str,
         ) -> Result<(), Box<dyn Error>> {
-            let VclTransaction::Req(req) = self.get_transaction(vp_task, name)? else {
-                return Err(name.into());
-            };
+            let req = self.get_req(vp_task, name)?;
             // XXX: we'll always have one of those, but maybe people would want
             // `req_top`, or even `bereq` while in `vcl_pipe`?
             let vcl_req = ctx.http_req.as_ref().or(ctx.http_bereq.as_ref()).unwrap();
@@ -330,10 +338,7 @@ mod reqwest {
             /// request handle
             name: &str,
         ) -> Result<VCL_STRING, VclError> {
-            let body = self
-                .get_resp(vp_vcl, vp_task, name)
-                .map_err(|e| VclError::new(e.to_string()))?;
-            match body {
+            match self.get_resp(vp_vcl, vp_task, name)? {
                 Err(_) => Ok(VCL_STRING::default()),
                 Ok(resp) => match resp.body {
                     None => Ok(VCL_STRING::default()),
@@ -353,10 +358,10 @@ mod reqwest {
             /// request handle
             name: &str,
         ) -> Result<Option<String>, Box<dyn Error>> {
-            match self.get_resp(vp_vcl, vp_task, name)? {
-                Err(e) => Ok(Some(e.to_string())),
-                Ok(_) => Ok(None),
-            }
+            Ok(self
+                .get_resp(vp_vcl, vp_task, name)?
+                .err()
+                .map(|e| e.to_string()))
         }
 
         /// Return a VCL backend built upon the `client` specification
@@ -371,8 +376,10 @@ mod reqwest {
         // discarded
         if let Event::Load = event {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            let (sender, mut receiver) =
-                tokio::sync::mpsc::unbounded_channel::<(Request, Sender<RespMsg>)>();
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<(
+                Request,
+                Sender<Result<Response, anyhow::Error>>,
+            )>();
             rt.spawn(async move {
                 loop {
                     let (req, tx) = receiver.recv().await.unwrap();

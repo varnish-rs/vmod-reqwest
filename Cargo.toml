@@ -9,11 +9,11 @@ publish = false
 [dependencies]
 anyhow = "1"
 bytes = "1"
-reqwest = { version = "0.12", features = ["stream", "deflate", "gzip", "brotli", "rustls-tls"] }
+reqwest = { version = "0.13", features = ["stream", "deflate", "gzip", "brotli", "rustls", "blocking"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1.17"
-varnish = { version = "0.7.0", features = ["ffi"] }
+varnish = { version = "0.7.2", features = ["ffi"] }
 
 [lib]
 crate-type = ["cdylib"]

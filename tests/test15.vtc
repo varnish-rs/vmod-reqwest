@@ -1,0 +1,47 @@
+varnishtest "backend() retry without a cached body must be refused"
+
+server s1 {
+	rxreq
+	expect req.body == "0123456789"
+	txresp
+} -start
+
+# VCL, no backend needed
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	backend s1 none;
+
+	sub vcl_init {
+		new client = reqwest.client();
+	}
+
+	sub vcl_backend_fetch {
+		set bereq.backend = client.backend();
+	}
+
+	sub vcl_backend_response {
+		if (bereq.retries == 0) {
+			return (retry);
+		}
+	}
+} -start
+
+logexpect l1 -v v1 -i Error {
+	expect 0 * Error "Retry not possible, bereq.body not cached"
+} -start
+
+# no std.cache_req_body(), so the body is streamed straight from the client
+# and never cached. reqwest's backend reads it via Ctx::req_body(), which sets
+# bo.no_retry since it wasn't cached -- Varnish must refuse the forced retry
+# above and fall back to a synth error rather than re-reading the consumed
+# body against s1 a second time.
+client c1 {
+	txreq -method "POST" -hdr "host: ${s1_addr}:${s1_port}" -body "0123456789"
+	rxresp
+	expect resp.status == 503
+} -run
+
+logexpect l1 -wait
+
+server s1 -wait
