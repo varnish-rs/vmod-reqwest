@@ -13,7 +13,7 @@ reqwest = { version = "0.13", features = ["stream", "deflate", "gzip", "brotli",
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1.17"
-varnish = { git = "https://github.com/varnish-rs/varnish-rs.git", rev = "27bab58", features = ["ffi"] }
+varnish = { version = "0.7.2", features = ["ffi"] }
 
 [lib]
 crate-type = ["cdylib"]
