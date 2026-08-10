@@ -1,5 +1,7 @@
 varnishtest "probe inherits accept_invalid HTTPS settings"
 
+feature tls
+
 server s1 {
     # probe fires immediately after vcl_init
     tls_handshake
