@@ -114,7 +114,11 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
                     .map_err(|e| <String as Into<VclError>>::into(e.to_string()))?,
             )?;
         }
-        let content_length = resp.content_length().map(|s| usize::try_from(s).unwrap());
+        let content_length = resp
+            .content_length()
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|e| <String as Into<VclError>>::into(format!("invalid content-length ({e})")))?;
         Ok(Some(BackendResp {
             resp,
             content_length,

@@ -112,7 +112,11 @@ mod reqwest {
                 vrcb = vrcb.redirect(reqwest::redirect::Policy::none());
                 brcb = brcb.redirect(reqwest::redirect::Policy::none());
             } else {
-                let n = usize::try_from(follow).unwrap();
+                let n = usize::try_from(follow).map_err(|_| {
+                    VclError::new(format!(
+                        "reqwest: couldn't initialize {vcl_name}: follow value ({follow}) is too large"
+                    ))
+                })?;
                 vrcb = vrcb.redirect(reqwest::redirect::Policy::limited(n));
                 brcb = brcb.redirect(reqwest::redirect::Policy::limited(n));
             }
