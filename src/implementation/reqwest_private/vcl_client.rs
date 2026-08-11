@@ -76,7 +76,9 @@ pub struct BgThread {
 impl BgThread {
     fn spawn_req(&self, req: Request) -> Receiver<Result<Response, Error>> {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        self.sender.send((req, tx)).unwrap();
+        self.sender.send((req, tx)).expect(
+            "BgThread's receiver loop is gone, but it must outlive every client backed by this VCL",
+        );
         rx
     }
 }
@@ -135,7 +137,10 @@ impl client {
                 Self::wait_on(bgt, t);
             }
             VclTransaction::Sent(rx) => {
-                *t = match rx.blocking_recv().unwrap() {
+                *t = match rx
+                    .blocking_recv()
+                    .expect("BgThread dropped the response sender without replying")
+                {
                     Ok(resp) => VclTransaction::Resp(Ok(resp)),
                     Err(e) => VclTransaction::Resp(Err(format!("{e}: {}", e.root_cause()).into())),
                 };
@@ -187,7 +192,12 @@ impl client {
         name: &'a str,
     ) -> VclResult<Result<&'a Response, VclError>> {
         let t = self.get_transaction(vp_task, name)?;
-        Self::wait_on(vp_vcl.as_ref().unwrap(), t);
+        Self::wait_on(
+            vp_vcl
+                .as_ref()
+                .expect("BgThread priv should be initialized for the lifetime of the VCL"),
+            t,
+        );
         Ok(t.unwrap_resp())
     }
 }
