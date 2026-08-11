@@ -25,6 +25,7 @@ Don't hesitate to open github issues if something is unclear or impractical. You
 
 | vmod-reqwest | varnish |
 | :----------- | :-----: |
+| 0.1.0        | 9.0+ |
 | 0.0.17        | 9.0+ |
 | 0.0.16        | 8.0+ |
 | 0.0.15        | 7.7  |
