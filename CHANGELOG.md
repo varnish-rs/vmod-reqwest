@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0
+## 0.1.0 - 2026-08-10
 
 - Changed: backend fetch rewired onto `reqwest::blocking` (#37)
 - Fixed: probes now inherit `accept_invalid_certs`/`accept_invalid_hostnames` from their parent backend (#30)
