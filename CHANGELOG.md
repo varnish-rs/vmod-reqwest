@@ -6,6 +6,7 @@
 - Fixed: probes now inherit `accept_invalid_certs`/`accept_invalid_hostnames` from their parent backend (#30)
 - Changed: dropped Varnish 8 CI/support, minimum supported Varnish version is now 9.0+
 - Added: happy-path HTTPS backend test
+- Fixed: several panics on integer-conversion overflow (`follow`, response `Content-Length`) now return a `VclError` instead (#38)
 
 ## 0.0.17 - 2026-06-17
 
