@@ -1,0 +1,36 @@
+varnishtest "happy path HTTPS backend fetch"
+
+feature tls
+
+server s1 {
+    tls_handshake
+    rxreq
+    expect req.url == "/"
+    txresp
+} -start
+
+varnish v1 -vcl {
+    import reqwest from "${vmod}";
+
+    backend default none;
+
+    sub vcl_init {
+        new client = reqwest.client(
+            base_url = "https://${s1_addr}:${s1_port}",
+            accept_invalid_certs = true,
+            accept_invalid_hostnames = true
+        );
+    }
+
+    sub vcl_recv {
+        set req.backend_hint = client.backend();
+    }
+} -start
+
+client c1 {
+    txreq
+    rxresp
+    expect resp.status == 200
+} -run
+
+server s1 -wait
