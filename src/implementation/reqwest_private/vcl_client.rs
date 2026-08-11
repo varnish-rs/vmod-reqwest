@@ -76,9 +76,9 @@ pub struct BgThread {
 impl BgThread {
     fn spawn_req(&self, req: Request) -> Receiver<Result<Response, Error>> {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        self.sender
-            .send((req, tx))
-            .expect("BgThread's receiver loop is gone, but it must outlive every client backed by this VCL");
+        self.sender.send((req, tx)).expect(
+            "BgThread's receiver loop is gone, but it must outlive every client backed by this VCL",
+        );
         rx
     }
 }
