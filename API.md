@@ -107,6 +107,15 @@ Copy the native request headers (i.e. `req` or `bereq`) into the request named `
 * `STRING name`:
 request handle
 
+### Method `VOID <object>.copy_headers_to_resp(STRING name, STRING key)`
+
+Append every value of the response header `key` from the sideband request `name` onto the native response (`beresp` on the backend side, `resp` on the client side), one header line per value, so multi-value headers such as `Set-Cookie` are carried over without being joined (RFC 9110 §5.3, RFC 6265 §3). Lines are appended, never replaced. The request must have been created in the same task; if it failed, or the header is absent, nothing is copied. Only allowed where the response has a workspace: `vcl_backend_response`, `vcl_backend_refresh`, `vcl_backend_error`, `vcl_deliver` and `vcl_synth`.
+
+* `STRING name`:
+request handle
+* `STRING key`:
+name of the response header to copy
+
 ### Method `INT <object>.status(STRING name)`
 
 Retrieve the response status (send and wait if necessary), returns 0 if the response failed, but will cause a VCL error if call on a non-existing request.

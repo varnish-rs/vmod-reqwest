@@ -281,6 +281,43 @@ mod reqwest {
             Ok(())
         }
 
+        /// Append every value of the response header `key` from the sideband request `name` onto the native response (`beresp` on the backend side, `resp` on the client side), one header line per value, so multi-value headers such as `Set-Cookie` are carried over without being joined (RFC 9110 §5.3, RFC 6265 §3). Lines are appended, never replaced. The request must have been created in the same task; if it failed, or the header is absent, nothing is copied. Only allowed where the response has a workspace: `vcl_backend_response`, `vcl_backend_refresh`, `vcl_backend_error`, `vcl_deliver` and `vcl_synth`.
+        #[restrict(
+            vcl_backend_response,
+            vcl_backend_refresh,
+            vcl_backend_error,
+            vcl_deliver,
+            vcl_synth
+        )]
+        pub fn copy_headers_to_resp(
+            &self,
+            ctx: &mut Ctx,
+            #[shared_per_vcl] vp_vcl: Option<&BgThread>,
+            #[shared_per_task] vp_task: &mut Option<Box<Vec<Entry>>>,
+            /// request handle
+            name: &str,
+            /// name of the response header to copy
+            key: &str,
+        ) -> Result<(), Box<dyn Error>> {
+            let Ok(resp) = self.get_resp(vp_vcl, vp_task, name)? else {
+                return Ok(());
+            };
+
+            let vcl_resp =
+                ctx.http_beresp.as_mut().or(ctx.http_resp.as_mut()).ok_or(
+                    "reqwest.copy_headers_to_resp(): called outside of a response context",
+                )?;
+
+            for v in resp.headers.get_all(key) {
+                let v = v.to_str().map_err(|_| {
+                    format!("reqwest.copy_headers_to_resp(): header {key} is not visible ASCII")
+                })?;
+                vcl_resp.set_header(key, v)?;
+            }
+
+            Ok(())
+        }
+
         /// Retrieve the response status (send and wait if necessary), returns 0 if the response failed, but will cause a VCL error if call on a non-existing request.
         pub fn status(
             &self,

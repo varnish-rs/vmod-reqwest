@@ -1,0 +1,93 @@
+varnishtest ".copy_headers_to_resp()"
+
+# Sideband origin used from both the client and the backend side.
+server s1 {
+	rxreq
+	txresp -hdr "Set-Cookie: a=1" \
+	       -hdr "Set-Cookie: b=2; Expires=Wed, 21 Oct 2015 07:28:00 GMT" \
+	       -hdr "X-Multi: val1" -hdr "X-Multi: val2"
+} -repeat 2 -start
+
+# Real backend for the beresp case.
+server s2 {
+	rxreq
+	txresp -hdr "X-Origin: yes"
+} -start
+
+varnish v1 -vcl+backend {
+	import reqwest from "${vmod}";
+
+	sub vcl_init {
+		new client = reqwest.client();
+	}
+
+	sub vcl_recv {
+		if (req.url == "/synth") {
+			client.init("s1", "http://${s1_addr}:${s1_port}/");
+			client.send("s1");
+			return (synth(200));
+		}
+	}
+
+	sub vcl_synth {
+		client.copy_headers_to_resp("s1", "Set-Cookie");
+		client.copy_headers_to_resp("s1", "X-Multi");
+		# absent in the sideband response: no-op
+		client.copy_headers_to_resp("s1", "X-Missing");
+		return (deliver);
+	}
+
+	sub vcl_backend_fetch {
+		set bereq.backend = s2;
+		client.init("s1", "http://${s1_addr}:${s1_port}/");
+		client.send("s1");
+	}
+
+	sub vcl_backend_response {
+		client.copy_headers_to_resp("s1", "Set-Cookie");
+		client.copy_headers_to_resp("s1", "X-Multi");
+	}
+} -start
+
+logexpect l1 -v v1 -g vxid {
+	expect * * RespHeader "^Set-Cookie: a=1$"
+	expect * * RespHeader "^Set-Cookie: b=2; Expires=Wed, 21 Oct 2015 07:28:00 GMT$"
+	expect * * RespHeader "^X-Multi: val1$"
+	expect * * RespHeader "^X-Multi: val2$"
+	expect * * BerespHeader "^Set-Cookie: a=1$"
+	expect * * BerespHeader "^Set-Cookie: b=2; Expires=Wed, 21 Oct 2015 07:28:00 GMT$"
+	expect * * BerespHeader "^X-Multi: val1$"
+	expect * * BerespHeader "^X-Multi: val2$"
+} -start
+
+client c1 {
+	txreq -url "/synth"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Missing == <undef>
+
+	txreq -url "/fetch"
+	rxresp
+	expect resp.status == 200
+	expect resp.http.X-Origin == "yes"
+} -run
+
+logexpect l1 -wait
+
+server s1 -wait
+server s2 -wait
+
+# No response exists in vcl_recv (req->resp has no workspace yet), so the
+# method is restricted and VCC must reject it at compile time.
+varnish v1 -errvcl {Not available in subroutine 'vcl_recv'.} {
+	import reqwest from "${vmod}";
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client();
+	}
+
+	sub vcl_recv {
+		client.copy_headers_to_resp("s1", "Set-Cookie");
+	}
+}
