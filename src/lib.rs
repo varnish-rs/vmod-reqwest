@@ -307,7 +307,7 @@ mod reqwest {
                 .http_beresp
                 .as_mut()
                 .or(ctx.http_resp.as_mut())
-                .ok_or("copy_headers_to_resp() called outside of a response context")?;
+                .ok_or("reqwest.copy_headers_to_resp(): called outside of a response context")?;
 
             for v in resp.headers.get_all(key) {
                 let v = v.to_str().map_err(|_| {
