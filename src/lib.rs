@@ -303,11 +303,10 @@ mod reqwest {
                 return Ok(());
             };
 
-            let vcl_resp = ctx
-                .http_beresp
-                .as_mut()
-                .or(ctx.http_resp.as_mut())
-                .ok_or("reqwest.copy_headers_to_resp(): called outside of a response context")?;
+            let vcl_resp =
+                ctx.http_beresp.as_mut().or(ctx.http_resp.as_mut()).ok_or(
+                    "reqwest.copy_headers_to_resp(): called outside of a response context",
+                )?;
 
             for v in resp.headers.get_all(key) {
                 let v = v.to_str().map_err(|_| {
