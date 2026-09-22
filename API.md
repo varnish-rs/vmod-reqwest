@@ -30,28 +30,28 @@ Create a `client` object that can be used both for backend requests and in-vcl r
 
 `base_url` and `https` are mutually exclusive and can't be specified together.
 
-* `[STRING base_url]`:
-* `[BOOL https]`:
-* `INT follow`:
+* `STRING base_url` (optional):
+* `BOOL https` (optional):
+* `INT follow` (optional, default: `10`):
 `follow` dictates whether to follow redirects, and how many hops are allowed before becoming an error. A value of `0` or less will disable redirect folowing,
 meaning you will actually receive 30X responses if they are sent by the server.
-* `[DURATION timeout]`:
+* `DURATION timeout` (optional):
 `connect_timeout` and `timeout` dictate how long we give a request to connect, and finish, respectively.
-* `[DURATION connect_timeout]`:
-* `BOOL auto_gzip`:
+* `DURATION connect_timeout` (optional):
+* `BOOL auto_gzip` (optional, default: `1`):
 `auto_gzip`, `auto_deflate` and `auto_brotli`, if set, will automatically set the relevant `accept-encoding` values and automatically decompress the response
 body. Note that this will only work if the `accept-encoding` header isn't already set AND if there's no `range` header. In practice, when contacting a backend, you will need to `unset bereq.http.accept-encoding;`, as Varnish sets it automatically.
-* `BOOL auto_deflate`:
-* `BOOL auto_brotli`:
-* `BOOL accept_invalid_certs`:
+* `BOOL auto_deflate` (optional, default: `1`):
+* `BOOL auto_brotli` (optional, default: `1`):
+* `BOOL accept_invalid_certs` (optional, default: `0`):
 avoid erroring on invalid certificates, for example self-signed ones. It's a dangerous option, use at your own risk!
-* `BOOL accept_invalid_hostnames`:
+* `BOOL accept_invalid_hostnames` (optional, default: `0`):
 even more dangerous, doesn't even require for the certificate hostname to match the server being contacted.
-* `[STRING http_proxy]`:
+* `STRING http_proxy` (optional):
 HTTP proxy to send your requests through
-* `[STRING https_proxy]`:
+* `STRING https_proxy` (optional):
 HTTPS proxy to send your requests through
-* `[PROBE probe]`:
+* `PROBE probe` (optional):
 `probe` will work the same way as for regular backends, but there are a few details to be aware of:
 - the health will only prevent a fetch for backends (i.e. when using `client.backend()`), not when creating free standing requests (`client.init()`/`client.send()`).
 - if the `client` has a `base_url`, the probe will prepend it to its `.url` field to know which URL to probe.
@@ -66,7 +66,7 @@ Create an http request, identifying it by its `name`. The request is local to th
 handle for the request, it'll be used by other methods to identify the transaction
 * `STRING url`:
 URL/path of the request
-* `STRING method`:
+* `STRING method` (optional, default: `"GET"`):
 HTTP method to use
 
 ### Method `VOID <object>.send(STRING name)`
@@ -131,7 +131,7 @@ Retrieve the value of the first header named `key`, or returns NULL if it doesn'
 request handle
 * `STRING key`:
 header name
-* `[STRING sep]`:
+* `STRING sep` (optional):
 if set, concatenate all headers named `key`, using `sep` as separator
 
 ### Method `STRING <object>.body_as_string(STRING name)`
