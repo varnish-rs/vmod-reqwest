@@ -109,6 +109,8 @@ request handle
 
 ### Method `VOID <object>.copy_headers_to_resp(STRING name, STRING key)`
 
+**Restricted to:** `vcl_backend_response`, `vcl_backend_refresh`, `vcl_backend_error`, `vcl_deliver`, `vcl_synth`
+
 Append every value of the response header `key` from the sideband request `name` onto the native response (`beresp` on the backend side, `resp` on the client side), one header line per value, so multi-value headers such as `Set-Cookie` are carried over without being joined (RFC 9110 §5.3, RFC 6265 §3). Lines are appended, never replaced. The request must have been created in the same task; if it failed, or the header is absent, nothing is copied. Only allowed where the response has a workspace: `vcl_backend_response`, `vcl_backend_refresh`, `vcl_backend_error`, `vcl_deliver` and `vcl_synth`.
 
 * `STRING name`:

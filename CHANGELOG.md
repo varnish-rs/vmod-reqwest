@@ -2,8 +2,9 @@
 
 ## 0.1.1 - 2026-09-21
 
-- Changed: updated `varnish-rs` dependency to `0.8.0`
-- Fixed: probes now inherit `accept_invalid_cert`  and `accept_invalid_host` values
+- Added: `client.copy_headers_to_resp()` to copy sideband response headers (e.g. `Set-Cookie`) into `beresp`/`resp`, one line per value (#40)
+- Changed: updated `varnish-rs` dependency to `0.8.0` (#41)
+- Changed: minimum supported Varnish version is now 9.1+
 
 ## 0.1.0 - 2026-08-10
 
