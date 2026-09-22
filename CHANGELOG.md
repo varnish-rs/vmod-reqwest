@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 - 2026-09-21
+
+- Changed: updated `varnish-rs` dependency to `0.8.0`
+- Fixed: probes now inherit `accept_invalid_cert`  and `accept_invalid_host` values
+
 ## 0.1.0 - 2026-08-10
 
 - Changed: backend fetch rewired onto `reqwest::blocking` (#37)
