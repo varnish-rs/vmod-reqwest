@@ -1,0 +1,140 @@
+varnishtest "Probed reqwest clients survive VCL warm/cold/discard churn"
+
+# Smoke test only: the race this exercises (a probe task touching freed
+# state after Cold + discard) has a microsecond window and can't be hit
+# reliably from a VTC. The structural guard is the unit test in backend.rs.
+
+# Slow probe responses, so a probe is usually in flight when its VCL goes
+# cold and is discarded.
+server s0 {
+	rxreq
+	expect req.url == "/probe"
+	delay 0.5
+	txresp
+} -dispatch
+
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	probe p1 {
+		.url = "/probe";
+		.timeout = 2s;
+		.interval = 1s;
+	}
+
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
+	}
+} -start
+
+delay 1.2
+
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	probe p1 {
+		.url = "/probe";
+		.timeout = 2s;
+		.interval = 1s;
+	}
+
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
+	}
+}
+
+varnish v1 -cliok "vcl.state vcl1 cold"
+varnish v1 -cliok "vcl.discard vcl1"
+
+delay 1.2
+
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	probe p1 {
+		.url = "/probe";
+		.timeout = 2s;
+		.interval = 1s;
+	}
+
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
+	}
+}
+
+varnish v1 -cliok "vcl.state vcl2 cold"
+varnish v1 -cliok "vcl.discard vcl2"
+
+delay 1.2
+
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	probe p1 {
+		.url = "/probe";
+		.timeout = 2s;
+		.interval = 1s;
+	}
+
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
+	}
+}
+
+varnish v1 -cliok "vcl.state vcl3 cold"
+varnish v1 -cliok "vcl.discard vcl3"
+
+delay 1.2
+
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	probe p1 {
+		.url = "/probe";
+		.timeout = 2s;
+		.interval = 1s;
+	}
+
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
+	}
+}
+
+varnish v1 -cliok "vcl.state vcl4 cold"
+varnish v1 -cliok "vcl.discard vcl4"
+
+delay 1.2
+
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	probe p1 {
+		.url = "/probe";
+		.timeout = 2s;
+		.interval = 1s;
+	}
+
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
+	}
+}
+
+varnish v1 -cliok "vcl.state vcl5 cold"
+varnish v1 -cliok "vcl.discard vcl5"
+
+delay 1.2
+
+varnish v1 -cliok "vcl.list"
+varnish v1 -expect MGT.child_panic == 0
