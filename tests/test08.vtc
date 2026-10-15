@@ -1,38 +1,23 @@
 varnishtest "probe with base_url"
 
+barrier b1 cond 2
+
 server s1 {
+	# hold the first probe until c1 has seen the backend sick
 	rxreq
 	expect req.url == "/probe"
-	txresp
-	close
-	accept
-
-	rxreq
-	expect req.url == "/probe"
+	barrier b1 sync
 	txresp
 	accept
 
-	rxreq
-	expect req.url == "/req"
-	txresp
-	accept
-
-	rxreq
-	expect req.url == "/probe"
-	txresp -status 404
-	accept
-
-	rxreq
-	expect req.url == "/probe"
-	txresp -status 404
-	accept
-
-	# should never be reached, but we want to send something
-	# if the backend is not marked as unhealthy
-	rxreq
-	expect req.url == "/req2"
-	txresp
-	accept
+	# probes and /req, in whatever order they come (-break stops this
+	# loop once we need the probes to fail)
+	loop 100 {
+		rxreq
+		expect req.url ~ "^/(probe|req)$"
+		txresp
+		accept
+	}
 } -start
 
 # VCL, no backend needed
@@ -58,20 +43,54 @@ varnish v1 -arg "-p debug=+syncvsl" -vcl {
 	}
 } -start
 
+# -d 1: read from the head of the log, the first probe runs at warm
+logexpect l1 -v v1 -g raw -d 1 {
+	expect * 0 Backend_health "^client Went healthy "
+} -start
+
 client c1 {
+	# initial = 1 of threshold 3: two more good probes are needed, and
+	# the first probe is held by s1
 	txreq -url "/req"
 	rxresp
 	expect resp.status == 503
+	barrier b1 sync
+} -run
 
-	delay 1.5
+logexpect l1 -wait
 
+client c1 {
 	txreq -url "/req"
 	rxresp
 	expect resp.status == 200
+} -run
 
-	delay 2
+logexpect l2 -v v1 -g raw {
+	expect * 0 Backend_health "^client Went sick .* Error: expected 200 status, got 404$"
+} -start
 
+# restart s1 on the same port, failing every probe: two failures take
+# the backend from 4/4 to 2/4
+server s1 -break
+server s1 -listen "${s1_sock}" {
+	loop 100 {
+		rxreq
+		expect req.url == "/probe"
+		txresp -status 404
+		accept
+	}
+} -start
+
+logexpect l2 -wait
+
+logexpect l3 -v v1 -g raw {
+	expect * * FetchError "^reqwest: unhealthy$"
+} -start
+
+client c1 {
 	txreq -url "/req2"
 	rxresp
 	expect resp.status == 503
 } -run
+
+logexpect l3 -wait

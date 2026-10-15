@@ -141,7 +141,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
 
         assert!(probe_state.spec.window <= 64);
 
-        let bitmap = probe_state.shared.history.load(Ordering::Relaxed);
+        let bitmap = probe_state.shared.history.load(Ordering::Acquire);
         (
             is_healthy(bitmap, probe_state.spec.window, probe_state.spec.threshold),
             *probe_state
@@ -204,7 +204,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
         else {
             return;
         };
-        let bitmap = shared.history.load(Ordering::Relaxed);
+        let bitmap = shared.history.load(Ordering::Acquire);
         vsb.write(&format!(
             "{}/{}\t{}",
             good_probes(bitmap, *window),
@@ -232,7 +232,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             vsb.write(&state).expect("vsb buffer full");
             return;
         };
-        let bitmap = shared.history.load(Ordering::Relaxed);
+        let bitmap = shared.history.load(Ordering::Acquire);
         let window = *window;
         let threshold = *threshold;
         let mut s = format!(
@@ -268,7 +268,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             vsb.write(&"[]").expect("vsb buffer full");
             return;
         };
-        let bitmap = shared.history.load(Ordering::Relaxed);
+        let bitmap = shared.history.load(Ordering::Acquire);
         vsb.write(&format!(
             "[{}, {}, \"{}\"]",
             good_probes(bitmap, *window),
@@ -334,7 +334,7 @@ fn update_health(
     let new_bit = u64::from(probe_ok);
     bitmap = bitmap.wrapping_shl(1) | new_bit;
     let new_health = is_healthy(bitmap, window, threshold);
-    (bitmap, new_health, new_health == old_health)
+    (bitmap, new_health, new_health != old_health)
 }
 
 /// Spawn the probing loop on `rt`. The task only owns copies of what it needs
@@ -362,7 +362,7 @@ where
         for i in 0..std::cmp::min(spec.initial, 64) {
             h |= 1 << i;
         }
-        history.store(h, Ordering::Relaxed);
+        history.store(h, Ordering::Release);
         let mut avg_rate = 0_f64;
         loop {
             let msg;
@@ -392,9 +392,18 @@ where
                     false
                 }
             };
-            let bitmap = history.load(Ordering::Relaxed);
+            let bitmap = history.load(Ordering::Acquire);
             let (bitmap, healthy, changed) =
                 update_health(bitmap, spec.threshold, spec.window, new_bit);
+            if changed {
+                *shared
+                    .health_changed
+                    .lock()
+                    .expect("health_changed mutex poisoned") = SystemTime::now();
+            }
+            // Publish the new state before logging it, so that whoever waits
+            // on the BackendHealth line observes the matching health.
+            history.store(bitmap, Ordering::Release);
             log_health(format!(
                 "{} {} {} {} {} {} {} {} {} {}",
                 name,
@@ -408,7 +417,6 @@ where
                 *avg.lock().unwrap(),
                 msg
             ));
-            history.store(bitmap, Ordering::Relaxed);
             tokio::time::sleep(spec.interval).await;
         }
     })
@@ -513,5 +521,65 @@ mod tests {
         let err = rt.block_on(handle).unwrap_err();
         assert!(err.is_cancelled());
         assert_eq!(Arc::strong_count(&state.shared), 1);
+    }
+
+    #[test]
+    fn update_health_reports_flips() {
+        // window 3, threshold 2: 0b1 is sick, one good probe makes it
+        // healthy (bits past the window are kept, but not counted)
+        assert_eq!(update_health(0b1, 2, 3, true), (0b11, true, true));
+        assert_eq!(update_health(0b11, 2, 3, true), (0b111, true, false));
+        assert_eq!(update_health(0b111, 2, 3, false), (0b1110, true, false));
+        assert_eq!(update_health(0b1110, 2, 3, false), (0b11100, false, true));
+        assert_eq!(
+            update_health(0b11100, 2, 3, false),
+            (0b11_1000, false, false)
+        );
+    }
+
+    // The flip to healthy must be logged as "Went healthy", with the new
+    // state already visible and `health_changed` moved forward.
+    #[test]
+    fn probe_flip_is_published_before_logging() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut buf = [0_u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let probe = Probe {
+            request: ProbeRequest::Url(format!("http://{addr}/probe")),
+            timeout: Duration::from_secs(5),
+            interval: Duration::from_secs(60),
+            exp_status: 200,
+            window: 3,
+            threshold: 2,
+            initial: 1,
+        };
+        let state = build_probe_state(probe, None, reqwest::ClientBuilder::new()).unwrap();
+        let created = *state.shared.health_changed.lock().unwrap();
+        let shared = Arc::clone(&state.shared);
+        let (tx, rx) = mpsc::channel();
+        let handle = spawn_probe(rt.handle(), &state, "test".to_string(), move |msg| {
+            let bitmap = shared.history.load(Ordering::Acquire);
+            let changed = *shared.health_changed.lock().unwrap();
+            tx.send((msg, bitmap, changed)).unwrap();
+        });
+        let (msg, bitmap, changed) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        handle.abort();
+        assert!(msg.starts_with("test Went healthy "), "{msg}");
+        assert_eq!(bitmap, 0b11);
+        assert!(changed > created);
     }
 }
