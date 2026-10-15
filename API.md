@@ -37,6 +37,7 @@ Create a `client` object that can be used both for backend requests and in-vcl r
 meaning you will actually receive 30X responses if they are sent by the server.
 * `DURATION timeout` (optional):
 `connect_timeout` and `timeout` dictate how long we give a request to connect, and finish, respectively.
+Probes use `connect_timeout`, but not `timeout`: they use the probe's `.timeout` instead.
 * `DURATION connect_timeout` (optional):
 * `BOOL auto_gzip` (optional, default: `1`):
 `auto_gzip`, `auto_deflate` and `auto_brotli`, if set, will automatically set the relevant `accept-encoding` values and automatically decompress the response
@@ -48,7 +49,7 @@ avoid erroring on invalid certificates, for example self-signed ones. It's a dan
 * `BOOL accept_invalid_hostnames` (optional, default: `0`):
 even more dangerous, doesn't even require for the certificate hostname to match the server being contacted.
 * `STRING http_proxy` (optional):
-HTTP proxy to send your requests through
+HTTP proxy to send your requests through. Probes use the same proxies as the other requests.
 * `STRING https_proxy` (optional):
 HTTPS proxy to send your requests through
 * `PROBE probe` (optional):
