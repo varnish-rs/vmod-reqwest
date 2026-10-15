@@ -32,10 +32,35 @@ varnish v1 -arg "-p debug=+syncvsl" -vcl {
 	}
 } -start
 
+# -d 1: read from the head of the log, the first probe runs at warm
+logexpect l1 -v v1 -g raw -d 1 {
+	expect * 0 Backend_health "^client Went healthy "
+} -start
+
+logexpect l1 -wait
+
 shell {
-	varnishadm -n ${v1_name} backend.list -j -p > /tmp/logged
-	varnishadm -n ${v1_name} backend.list -j -p | jq
-	varnishadm -n ${v1_name} backend.list -j    | jq
-	varnishadm -n ${v1_name} backend.list
-	varnishadm -n ${v1_name} backend.list -p
+	set -e
+	varnishadm -n ${v1_name} backend.list -j -p | jq -e '
+		.[3]["vcl1.client"] |
+		.admin_health == "probe" and
+		.probe_message[0] >= 3 and
+		.probe_message[1] == 4 and
+		.probe_message[2] == "healthy" and
+		.probe_details.request.Url == "/probe" and
+		.probe_details.interval.secs == 1 and
+		.probe_details.exp_status == 200 and
+		.probe_details.window == 4 and
+		.probe_details.threshold == 3 and
+		.probe_details.initial == 1'
+	varnishadm -n ${v1_name} backend.list -j -p | jq -e '
+		.[3]["vcl1.client2"] |
+		.admin_health == "healthy" and .probe_message == []'
+	varnishadm -n ${v1_name} backend.list -j | jq -e '
+		.[3] | keys == ["vcl1.client", "vcl1.client2"] and
+		(map(has("probe_details")) | any | not)'
 }
+
+varnish v1 -cliexpect {vcl1\.client +probe +[34]/4\s+healthy } "backend.list"
+varnish v1 -cliexpect "vcl1\\.client2 +healthy " "backend.list"
+varnish v1 -cliexpect "Current states  good: +[34] threshold: +3 window: +4" "backend.list -p"

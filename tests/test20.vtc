@@ -1,0 +1,52 @@
+varnishtest "probe logs Went/Still health transitions correctly"
+
+server s1 {
+	loop 100 {
+		rxreq
+		expect req.url == "/probe"
+		txresp
+		accept
+	}
+} -start
+
+varnish v1 -vcl {
+	import reqwest from "${vmod}";
+
+	# starts sick (1 good of 2 needed); the first successful probe
+	# flips it to healthy, the next ones keep it there
+	probe p1 {
+		.url = "/probe";
+		.window = 3;
+		.initial = 1;
+		.threshold = 2;
+		.interval = 0.2s;
+	}
+
+	backend default none;
+
+	sub vcl_init {
+		new client = reqwest.client(base_url = "http://${s1_addr}:${s1_port}", probe = p1);
+	}
+} -start
+
+# -d 1: the first probe runs at warm, during -start, so read from the
+# head of the log; -q: only see Backend_health, so "0 0"/"0 =" pin the exact
+# first and second lines
+logexpect l1 -v v1 -g raw -d 1 -q "Backend_health" {
+	expect 0 0 Backend_health "^client Went healthy "
+	expect 0 = Backend_health "^client Still healthy "
+} -start
+
+logexpect l1 -wait
+
+# "Error" skips any successful probe logged before the -break
+logexpect l2 -v v1 -g raw -q "Backend_health" {
+	expect * 0 Backend_health "^client Still healthy .* Error"
+	expect 0 = Backend_health "^client Went sick .* Error"
+	expect 0 = Backend_health "^client Still sick .* Error"
+} -start
+
+# probes now fail: 2 good of 3, then 1 (sick), then 0
+server s1 -break
+
+logexpect l2 -wait

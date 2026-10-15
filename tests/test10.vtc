@@ -1,5 +1,7 @@
 varnishtest "probe with full .url"
 
+barrier b1 cond 2
+
 server s1 {
 	rxreq
 	expect req.url == "/url2"
@@ -7,23 +9,21 @@ server s1 {
 } -start
 
 server s2 {
+	# hold the first probe until c1 has seen the backend sick
 	rxreq
 	expect req.url == "/probe"
+	barrier b1 sync
 	txresp
 	close
 	accept
 
-	rxreq
-	expect req.url == "/probe"
-	txresp
-	close
-	accept
-
-	rxreq
-	expect req.url == "/probe"
-	txresp
-	close
-	accept
+	loop 100 {
+		rxreq
+		expect req.url == "/probe"
+		txresp
+		close
+		accept
+	}
 } -start
 
 # VCL, no backend needed
@@ -52,13 +52,22 @@ varnish v1 -arg "-p debug=+syncvsl" -vcl {
 	}
 } -start
 
+# -d 1: read from the head of the log, the first probe runs at warm
+logexpect l1 -v v1 -g raw -d 1 {
+	expect * 0 Backend_health "^client Went healthy "
+} -start
+
 client c1 {
+	# 2 good probes of 4 needed, and the first probe is held by s2
 	txreq -url "/url1"
 	rxresp
 	expect resp.status == 503
+	barrier b1 sync
+} -run
 
-	delay 1.5
+logexpect l1 -wait
 
+client c1 {
 	txreq -url "/url2"
 	rxresp
 	expect resp.status == 200

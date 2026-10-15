@@ -11,7 +11,7 @@ server s1 {
     close
     accept
 
-    # regular client request forwarded through the reqwest client (at t≈1.5s)
+    # regular client request forwarded through the reqwest client
     tls_handshake
     rxreq
     expect req.url == "/"
@@ -26,7 +26,7 @@ varnish v1 -arg "-p debug=+syncvsl" -vcl {
         .window = 1;
         .initial = 0;
         .threshold = 1;
-        .interval = 5s;
+        .interval = 60s;
     }
 
     backend default none;
@@ -45,10 +45,15 @@ varnish v1 -arg "-p debug=+syncvsl" -vcl {
     }
 } -start
 
-client c1 {
-    # wait for the first probe to succeed — backend should now be healthy
-    delay 1.5
+# -d 1: read from the head of the log, the first probe runs at warm;
+# the next one is 60s away, so s1 sees the client request first
+logexpect l1 -v v1 -g raw -d 1 {
+    expect * 0 Backend_health "^client Went healthy "
+} -start
 
+logexpect l1 -wait
+
+client c1 {
     txreq
     rxresp
     expect resp.status == 200

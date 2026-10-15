@@ -13,7 +13,7 @@ use super::vcl_client::BgThread;
 pub struct ProbeState {
     spec: Probe,
     history: AtomicU64,
-    health_changed: SystemTime,
+    health_changed: Mutex<SystemTime>,
     url: Url,
     join_handle: Option<tokio::task::JoinHandle<()>>,
     avg: Mutex<f64>,
@@ -135,10 +135,13 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
 
         assert!(probe_state.spec.window <= 64);
 
-        let bitmap = probe_state.history.load(Ordering::Relaxed);
+        let bitmap = probe_state.history.load(Ordering::Acquire);
         (
             is_healthy(bitmap, probe_state.spec.window, probe_state.spec.threshold),
-            probe_state.health_changed,
+            *probe_state
+                .health_changed
+                .lock()
+                .expect("health_changed mutex poisoned"),
         )
     }
 
@@ -180,7 +183,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
         else {
             return;
         };
-        let bitmap = history.load(Ordering::Relaxed);
+        let bitmap = history.load(Ordering::Acquire);
         vsb.write(&format!(
             "{}/{}\t{}",
             good_probes(bitmap, *window),
@@ -209,7 +212,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             vsb.write(&state).expect("vsb buffer full");
             return;
         };
-        let bitmap = history.load(Ordering::Relaxed);
+        let bitmap = history.load(Ordering::Acquire);
         let window = *window;
         let threshold = *threshold;
         let mut s = format!(
@@ -245,7 +248,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             vsb.write(&"[]").expect("vsb buffer full");
             return;
         };
-        let bitmap = history.load(Ordering::Relaxed);
+        let bitmap = history.load(Ordering::Acquire);
         vsb.write(&format!(
             "[{}, {}, \"{}\"]",
             good_probes(bitmap, *window),
@@ -311,7 +314,7 @@ fn update_health(
     let new_bit = u64::from(probe_ok);
     bitmap = bitmap.wrapping_shl(1) | new_bit;
     let new_health = is_healthy(bitmap, window, threshold);
-    (bitmap, new_health, new_health == old_health)
+    (bitmap, new_health, new_health != old_health)
 }
 
 // cheating hard with the pointer here, but the be_event function will stop us
@@ -328,12 +331,13 @@ fn spawn_probe(
     let url = probe_state.url.clone();
     let history = &probe_state.history;
     let avg = &probe_state.avg;
+    let health_changed = &probe_state.health_changed;
     probe_state.join_handle = Some(bgt.rt.spawn(async move {
         let mut h = 0_u64;
         for i in 0..std::cmp::min(spec.initial, 64) {
             h |= 1 << i;
         }
-        history.store(h, Ordering::Relaxed);
+        history.store(h, Ordering::Release);
         let mut avg_rate = 0_f64;
         loop {
             let msg;
@@ -377,9 +381,17 @@ fn spawn_probe(
                     }
                 }
             };
-            let bitmap = history.load(Ordering::Relaxed);
+            let bitmap = history.load(Ordering::Acquire);
             let (bitmap, healthy, changed) =
                 update_health(bitmap, spec.threshold, spec.window, new_bit);
+            if changed {
+                *health_changed
+                    .lock()
+                    .expect("health_changed mutex poisoned") = SystemTime::now();
+            }
+            // Publish the new state before logging it, so that whoever waits
+            // on the BackendHealth line observes the matching health.
+            history.store(bitmap, Ordering::Release);
             log(
                 LogTag::BackendHealth,
                 format!(
@@ -396,7 +408,6 @@ fn spawn_probe(
                     msg
                 ),
             );
-            history.store(bitmap, Ordering::Relaxed);
             tokio::time::sleep(spec.interval).await;
         }
     }));
@@ -450,11 +461,30 @@ pub fn build_probe_state(
     Ok(ProbeState {
         spec: probe,
         history: AtomicU64::new(0),
-        health_changed: SystemTime::now(),
+        health_changed: Mutex::new(SystemTime::now()),
         join_handle: None,
         url,
         avg: Mutex::new(0_f64),
         accept_invalid_certs,
         accept_invalid_hostnames,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_health_reports_flips() {
+        // window 3, threshold 2: 0b1 is sick, one good probe makes it
+        // healthy (bits past the window are kept, but not counted)
+        assert_eq!(update_health(0b1, 2, 3, true), (0b11, true, true));
+        assert_eq!(update_health(0b11, 2, 3, true), (0b111, true, false));
+        assert_eq!(update_health(0b111, 2, 3, false), (0b1110, true, false));
+        assert_eq!(update_health(0b1110, 2, 3, false), (0b11100, false, true));
+        assert_eq!(
+            update_health(0b11100, 2, 3, false),
+            (0b11_1000, false, false)
+        );
+    }
 }
