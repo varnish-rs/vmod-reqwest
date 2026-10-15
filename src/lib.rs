@@ -44,6 +44,11 @@ mod reqwest {
             #[default(10)]
             follow: i64,
             /// `connect_timeout` and `timeout` dictate how long we give a request to connect, and finish, respectively.
+            /// `connect_timeout` is unlimited if unset. `timeout` behaves differently depending on the request type:
+            /// - backend fetches (`client.backend()`): if unset, defaults to 30 seconds. It covers sending the request and receiving the response headers, then applies again to each read of the response body, so it doesn't cap the total transfer time.
+            /// - `client.send()` requests: unlimited if unset, otherwise a total deadline, from the start of the request until the response body has been fully received.
+            ///
+            /// Varnish's own `connect_timeout`, `first_byte_timeout` and `between_bytes_timeout` (parameters and `bereq` variables) are not used. Probes only use the probe's `.timeout`.
             timeout: Option<Duration>,
             connect_timeout: Option<Duration>,
             /// `auto_gzip`, `auto_deflate` and `auto_brotli`, if set, will automatically set the relevant `accept-encoding` values and automatically decompress the response
@@ -58,9 +63,13 @@ mod reqwest {
             /// even more dangerous, doesn't even require for the certificate hostname to match the server being contacted.
             #[default(false)]
             accept_invalid_hostnames: bool,
-            /// HTTP proxy to send your requests through
+            /// HTTP proxy to send your `http://` requests through.
+            ///
+            /// If neither `http_proxy` nor `https_proxy` is set, the proxies are read from varnishd's environment: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` (or their lowercase versions), for backend fetches and `client.send()` requests. Setting either parameter disables the environment proxies completely, including `NO_PROXY`, so setting only `http_proxy` means `https://` requests are sent directly.
+            ///
+            /// Probes never use `http_proxy` or `https_proxy`: they always use the environment proxies, if any.
             http_proxy: Option<&str>,
-            /// HTTPS proxy to send your requests through
+            /// HTTPS proxy to send your `https://` requests through. See `http_proxy` for how it interacts with the environment.
             https_proxy: Option<&str>,
             /// `probe` will work the same way as for regular backends, but there are a few details to be aware of:
             /// - the health will only prevent a fetch for backends (i.e. when using `client.backend()`), not when creating free standing requests (`client.init()`/`client.send()`).
