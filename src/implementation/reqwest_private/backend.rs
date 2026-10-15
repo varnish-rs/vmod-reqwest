@@ -1,5 +1,5 @@
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use reqwest::{Client, Url};
@@ -10,15 +10,21 @@ use varnish::vcl::{
 
 use super::vcl_client::BgThread;
 
+/// State shared between the backend and its probe task. The task owns an
+/// `Arc` clone, so it never borrows from `ProbeState` and stays sound even if
+/// it is still polling when the backend is freed (`abort()` is asynchronous).
+struct ProbeShared {
+    history: AtomicU64,
+    avg: Mutex<f64>,
+    health_changed: Mutex<SystemTime>,
+}
+
 pub struct ProbeState {
     spec: Probe,
-    history: AtomicU64,
-    health_changed: SystemTime,
+    shared: Arc<ProbeShared>,
     url: Url,
-    join_handle: Option<tokio::task::JoinHandle<()>>,
-    avg: Mutex<f64>,
-    accept_invalid_certs: bool,
-    accept_invalid_hostnames: bool,
+    join_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    client: Client,
 }
 #[allow(non_camel_case_types)]
 pub struct client {
@@ -135,10 +141,14 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
 
         assert!(probe_state.spec.window <= 64);
 
-        let bitmap = probe_state.history.load(Ordering::Relaxed);
+        let bitmap = probe_state.shared.history.load(Ordering::Relaxed);
         (
             is_healthy(bitmap, probe_state.spec.window, probe_state.spec.threshold),
-            probe_state.health_changed,
+            *probe_state
+                .shared
+                .health_changed
+                .lock()
+                .expect("health_changed mutex poisoned"),
         )
     }
 
@@ -148,22 +158,36 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             return;
         };
 
-        // enter the runtime to
-        let _guard = unsafe { (*self.bgt).rt.enter() };
+        // SAFETY: the `BgThread` lives in the VCL's `shared_per_vcl` priv,
+        // which outlives every backend of that VCL.
+        let bgt = unsafe { &*self.bgt };
+        // Varnish alternates Warm and Cold events for a backend, so Warm never
+        // finds a running task and aborting an old handle there is purely
+        // defensive.
         match event {
             // start the probing loop
             Event::Warm => {
-                spawn_probe(
-                    unsafe { &*self.bgt },
-                    std::ptr::from_ref::<ProbeState>(probe_state).cast_mut(),
-                    self.name.clone(),
-                    probe_state.accept_invalid_certs,
-                    probe_state.accept_invalid_hostnames,
-                );
+                let handle = spawn_probe(bgt.rt.handle(), probe_state, self.name.clone(), |msg| {
+                    log(LogTag::BackendHealth, msg);
+                });
+                let old = probe_state
+                    .join_handle
+                    .lock()
+                    .expect("join_handle mutex poisoned")
+                    .replace(handle);
+                if let Some(old) = old {
+                    old.abort();
+                }
             }
             Event::Cold => {
-                // XXX: we should set the handle to None, but we don't have mutability, oh well...
-                probe_state.join_handle.as_ref().unwrap().abort();
+                let handle = probe_state
+                    .join_handle
+                    .lock()
+                    .expect("join_handle mutex poisoned")
+                    .take();
+                if let Some(handle) = handle {
+                    handle.abort();
+                }
             }
             _ => {}
         }
@@ -171,7 +195,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
 
     fn report(&self, _ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
         let Some(ProbeState {
-            history,
+            shared,
             spec: Probe {
                 window, threshold, ..
             },
@@ -180,7 +204,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
         else {
             return;
         };
-        let bitmap = history.load(Ordering::Relaxed);
+        let bitmap = shared.history.load(Ordering::Relaxed);
         vsb.write(&format!(
             "{}/{}\t{}",
             good_probes(bitmap, *window),
@@ -196,8 +220,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
 
     fn report_details(&self, ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
         let Some(ProbeState {
-            history,
-            avg,
+            shared,
             spec: Probe {
                 window, threshold, ..
             },
@@ -209,7 +232,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             vsb.write(&state).expect("vsb buffer full");
             return;
         };
-        let bitmap = history.load(Ordering::Relaxed);
+        let bitmap = shared.history.load(Ordering::Relaxed);
         let window = *window;
         let threshold = *threshold;
         let mut s = format!(
@@ -221,7 +244,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             good_probes(bitmap, window),
             threshold,
             window,
-            avg.lock().expect("avg mutex poisoned")
+            shared.avg.lock().expect("avg mutex poisoned")
         );
         for i in 0..64 {
             s += if bitmap.wrapping_shr(63 - i) & 1 == 1 {
@@ -235,7 +258,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
 
     fn report_json(&self, _ctx: &mut Ctx<'_>, vsb: &mut Buffer<'_>) {
         let Some(ProbeState {
-            history,
+            shared,
             spec: Probe {
                 window, threshold, ..
             },
@@ -245,7 +268,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             vsb.write(&"[]").expect("vsb buffer full");
             return;
         };
-        let bitmap = history.load(Ordering::Relaxed);
+        let bitmap = shared.history.load(Ordering::Relaxed);
         vsb.write(&format!(
             "[{}, {}, \"{}\"]",
             good_probes(bitmap, *window),
@@ -314,21 +337,27 @@ fn update_health(
     (bitmap, new_health, new_health == old_health)
 }
 
-// cheating hard with the pointer here, but the be_event function will stop us
-// before the references are invalid
-fn spawn_probe(
-    bgt: &'static BgThread,
-    probe_state: *mut ProbeState,
+/// Spawn the probing loop on `rt`. The task only owns copies of what it needs
+/// (notably an `Arc` clone of `probe_state.shared`) and borrows nothing from
+/// `probe_state`, so nothing it touches can be freed under it. `log_health`
+/// receives each `BackendHealth` line (a parameter so unit tests can run
+/// without varnishd's `VSL`).
+fn spawn_probe<F>(
+    rt: &tokio::runtime::Handle,
+    probe_state: &ProbeState,
     name: String,
-    accept_invalid_certs: bool,
-    accept_invalid_hostnames: bool,
-) {
-    let probe_state = unsafe { probe_state.as_mut().unwrap() };
+    log_health: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: Fn(String) + Send + 'static,
+{
     let spec = probe_state.spec.clone();
     let url = probe_state.url.clone();
-    let history = &probe_state.history;
-    let avg = &probe_state.avg;
-    probe_state.join_handle = Some(bgt.rt.spawn(async move {
+    let shared = Arc::clone(&probe_state.shared);
+    let client = probe_state.client.clone();
+    rt.spawn(async move {
+        let history = &shared.history;
+        let avg = &shared.avg;
         let mut h = 0_u64;
         for i in 0..std::cmp::min(spec.initial, 64) {
             h |= 1 << i;
@@ -338,75 +367,60 @@ fn spawn_probe(
         loop {
             let msg;
             let mut time = 0_f64;
-            let new_bit = match reqwest::ClientBuilder::new()
-                .timeout(spec.timeout)
-                .danger_accept_invalid_certs(accept_invalid_certs)
-                .danger_accept_invalid_hostnames(accept_invalid_hostnames)
-                .build()
-                .map(|req| req.get(url.clone()).send())
-            {
+            let start = Instant::now();
+            let new_bit = match client.get(url.clone()).send().await {
                 Err(e) => {
-                    msg = e.to_string();
+                    msg = format!("Error: {e}");
                     false
                 }
-                Ok(resp) => {
-                    let start = Instant::now();
-                    match resp.await {
-                        Err(e) => {
-                            msg = format!("Error: {e}");
-                            false
-                        }
-                        Ok(resp) if u32::from(resp.status().as_u16()) == spec.exp_status => {
-                            msg = format!("Success: {}", resp.status().as_u16());
-                            if avg_rate < 4.0 {
-                                avg_rate += 1.0;
-                            }
-                            time = start.elapsed().as_secs_f64();
-                            let mut avg = avg.lock().unwrap();
-                            *avg += (time - *avg) / avg_rate;
-                            true
-                        }
-                        Ok(resp) => {
-                            msg = format!(
-                                "Error: expected {} status, got {}",
-                                spec.exp_status,
-                                resp.status().as_u16()
-                            );
-                            false
-                        }
+                Ok(resp) if u32::from(resp.status().as_u16()) == spec.exp_status => {
+                    msg = format!("Success: {}", resp.status().as_u16());
+                    if avg_rate < 4.0 {
+                        avg_rate += 1.0;
                     }
+                    time = start.elapsed().as_secs_f64();
+                    let mut avg = avg.lock().unwrap();
+                    *avg += (time - *avg) / avg_rate;
+                    true
+                }
+                Ok(resp) => {
+                    msg = format!(
+                        "Error: expected {} status, got {}",
+                        spec.exp_status,
+                        resp.status().as_u16()
+                    );
+                    false
                 }
             };
             let bitmap = history.load(Ordering::Relaxed);
             let (bitmap, healthy, changed) =
                 update_health(bitmap, spec.threshold, spec.window, new_bit);
-            log(
-                LogTag::BackendHealth,
-                format!(
-                    "{} {} {} {} {} {} {} {} {} {}",
-                    name,
-                    if changed { "Went" } else { "Still" },
-                    if healthy { "healthy" } else { "sick" },
-                    "UNIMPLEMENTED",
-                    good_probes(bitmap, spec.window),
-                    spec.threshold,
-                    spec.window,
-                    time,
-                    *avg.lock().unwrap(),
-                    msg
-                ),
-            );
+            log_health(format!(
+                "{} {} {} {} {} {} {} {} {} {}",
+                name,
+                if changed { "Went" } else { "Still" },
+                if healthy { "healthy" } else { "sick" },
+                "UNIMPLEMENTED",
+                good_probes(bitmap, spec.window),
+                spec.threshold,
+                spec.window,
+                time,
+                *avg.lock().unwrap(),
+                msg
+            ));
             history.store(bitmap, Ordering::Relaxed);
             tokio::time::sleep(spec.interval).await;
         }
-    }));
+    })
 }
 
+/// `builder` carries the client's connection settings (proxies,
+/// `connect_timeout`, certificate checks); the probe timeout is added here,
+/// once the probe defaults are applied.
 pub fn build_probe_state(
     mut probe: Probe,
     base_url: Option<&str>,
-    accept_invalid_certs: bool,
-    accept_invalid_hostnames: bool,
+    builder: reqwest::ClientBuilder,
 ) -> Result<ProbeState, VclError> {
     // sanitize probe (see vbp_set_defaults in Varnish Cache)
     if probe.timeout.is_zero() {
@@ -447,14 +461,57 @@ pub fn build_probe_state(
         Url::parse(spec_url)
             .map_err(|e| VclError::new(format!("probe endpoint {spec_url} ({e})")))?
     };
+    let client = builder
+        .timeout(probe.timeout)
+        // Like native probes, open a fresh connection for every probe, so
+        // `connect_timeout` applies each time and a probe can't succeed on a
+        // stale pooled connection.
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|e| VclError::new(format!("couldn't build the probe client ({e})")))?;
     Ok(ProbeState {
         spec: probe,
-        history: AtomicU64::new(0),
-        health_changed: SystemTime::now(),
-        join_handle: None,
+        shared: Arc::new(ProbeShared {
+            history: AtomicU64::new(0),
+            avg: Mutex::new(0_f64),
+            health_changed: Mutex::new(SystemTime::now()),
+        }),
+        join_handle: Mutex::new(None),
         url,
-        avg: Mutex::new(0_f64),
-        accept_invalid_certs,
-        accept_invalid_hostnames,
+        client,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Guard, not a fail-before test: the old code could not even express this
+    // (the task borrowed `ProbeState` fields for 'static). It checks that the
+    // probe task holds no state beyond its own `Arc` clone, which it drops once
+    // cancelled, so freeing the backend after Cold can't leave the task with a
+    // dangling reference.
+    #[test]
+    fn aborted_probe_task_releases_shared_state() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // closed local port, so each poll fails fast
+        let probe = Probe {
+            request: ProbeRequest::Url("http://127.0.0.1:1/probe".to_string()),
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_millis(10),
+            exp_status: 200,
+            window: 8,
+            threshold: 3,
+            initial: 2,
+        };
+        let state = build_probe_state(probe, None, reqwest::ClientBuilder::new()).unwrap();
+        let handle = spawn_probe(rt.handle(), &state, "test".to_string(), |_| {});
+        assert_eq!(Arc::strong_count(&state.shared), 2);
+        // let the task run a few iterations
+        std::thread::sleep(Duration::from_millis(50));
+        handle.abort();
+        let err = rt.block_on(handle).unwrap_err();
+        assert!(err.is_cancelled());
+        assert_eq!(Arc::strong_count(&state.shared), 1);
+    }
 }
