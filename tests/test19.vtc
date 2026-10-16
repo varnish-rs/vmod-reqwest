@@ -4,12 +4,17 @@ varnishtest "Probed reqwest clients survive VCL warm/cold/discard churn"
 # state after Cold + discard) has a microsecond window and can't be hit
 # reliably from a VTC. The structural guard is the unit test in backend.rs.
 
-# Slow probe responses, so a probe is usually in flight when its VCL goes
-# cold and is discarded.
+# Timings: a VCL's probe task starts on its Warm event (during vcl.load,
+# or at child start for vcl1)
+# and its first request sits in s0 for 1s. Each cycle below goes cold and
+# discards the previous VCL right after loading the next one (a few hundred
+# ms), well inside that 1s, so the first probe is still in flight. Should a
+# slow vcl.load overrun it, the probe loop only sleeps 0.1s between 1s
+# requests, so a probe is still in flight ~90% of the time.
 server s0 {
 	rxreq
 	expect req.url == "/probe"
-	delay 0.5
+	delay 1
 	txresp
 } -dispatch
 
@@ -19,7 +24,7 @@ varnish v1 -vcl {
 	probe p1 {
 		.url = "/probe";
 		.timeout = 2s;
-		.interval = 1s;
+		.interval = 0.1s;
 	}
 
 	backend default none;
@@ -29,15 +34,13 @@ varnish v1 -vcl {
 	}
 } -start
 
-delay 1.2
-
 varnish v1 -vcl {
 	import reqwest from "${vmod}";
 
 	probe p1 {
 		.url = "/probe";
 		.timeout = 2s;
-		.interval = 1s;
+		.interval = 0.1s;
 	}
 
 	backend default none;
@@ -50,15 +53,13 @@ varnish v1 -vcl {
 varnish v1 -cliok "vcl.state vcl1 cold"
 varnish v1 -cliok "vcl.discard vcl1"
 
-delay 1.2
-
 varnish v1 -vcl {
 	import reqwest from "${vmod}";
 
 	probe p1 {
 		.url = "/probe";
 		.timeout = 2s;
-		.interval = 1s;
+		.interval = 0.1s;
 	}
 
 	backend default none;
@@ -71,15 +72,13 @@ varnish v1 -vcl {
 varnish v1 -cliok "vcl.state vcl2 cold"
 varnish v1 -cliok "vcl.discard vcl2"
 
-delay 1.2
-
 varnish v1 -vcl {
 	import reqwest from "${vmod}";
 
 	probe p1 {
 		.url = "/probe";
 		.timeout = 2s;
-		.interval = 1s;
+		.interval = 0.1s;
 	}
 
 	backend default none;
@@ -92,48 +91,8 @@ varnish v1 -vcl {
 varnish v1 -cliok "vcl.state vcl3 cold"
 varnish v1 -cliok "vcl.discard vcl3"
 
-delay 1.2
-
-varnish v1 -vcl {
-	import reqwest from "${vmod}";
-
-	probe p1 {
-		.url = "/probe";
-		.timeout = 2s;
-		.interval = 1s;
-	}
-
-	backend default none;
-
-	sub vcl_init {
-		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
-	}
-}
-
-varnish v1 -cliok "vcl.state vcl4 cold"
-varnish v1 -cliok "vcl.discard vcl4"
-
-delay 1.2
-
-varnish v1 -vcl {
-	import reqwest from "${vmod}";
-
-	probe p1 {
-		.url = "/probe";
-		.timeout = 2s;
-		.interval = 1s;
-	}
-
-	backend default none;
-
-	sub vcl_init {
-		new client = reqwest.client(base_url = "http://${s0_addr}:${s0_port}", probe = p1);
-	}
-}
-
-varnish v1 -cliok "vcl.state vcl5 cold"
-varnish v1 -cliok "vcl.discard vcl5"
-
+# Give an aborted probe task that kept running time to crash the child
+# before checking for a panic.
 delay 1.2
 
 varnish v1 -cliok "vcl.list"
