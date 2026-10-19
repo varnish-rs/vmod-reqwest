@@ -41,7 +41,7 @@ meaning you will actually receive 30X responses if they are sent by the server.
 - backend fetches (`client.backend()`): if unset, defaults to 30 seconds. It covers sending the request and receiving the response headers, then applies again to each read of the response body, so it doesn't cap the total transfer time.
 - `client.send()` requests: unlimited if unset, otherwise a total deadline, from the start of the request until the response body has been fully received.
 
-Varnish's own `connect_timeout`, `first_byte_timeout` and `between_bytes_timeout` (parameters and `bereq` variables) are not used. Probes only use the probe's `.timeout`.
+Varnish's own `connect_timeout`, `first_byte_timeout` and `between_bytes_timeout` (parameters and `bereq` variables) are not used. Probes use `connect_timeout`, but not `timeout`: they use the probe's `.timeout` instead.
 * `DURATION connect_timeout` (optional):
 * `BOOL auto_gzip` (optional, default: `1`):
 `auto_gzip`, `auto_deflate` and `auto_brotli`, if set, will automatically set the relevant `accept-encoding` values and automatically decompress the response
@@ -57,7 +57,7 @@ HTTP proxy to send your `http://` requests through.
 
 If neither `http_proxy` nor `https_proxy` is set, the proxies are read from varnishd's environment: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` (or their lowercase versions), for backend fetches and `client.send()` requests. Setting either parameter disables the environment proxies completely, including `NO_PROXY`, so setting only `http_proxy` means `https://` requests are sent directly.
 
-Probes never use `http_proxy` or `https_proxy`: they always use the environment proxies, if any.
+Probes use the same proxies as the other requests, including the environment proxies when neither parameter is set.
 * `STRING https_proxy` (optional):
 HTTPS proxy to send your `https://` requests through. See `http_proxy` for how it interacts with the environment.
 * `PROBE probe` (optional):

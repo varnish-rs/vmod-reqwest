@@ -1,0 +1,42 @@
+varnishtest "probes go through the client's http_proxy"
+
+# The proxy gets the probes in proxy form, with the absolute URL
+server sproxy {
+	loop 20 {
+		rxreq
+		expect req.url == "http://${bad_ip}:9090/probe"
+		txresp
+		close
+		accept
+	}
+} -start
+
+# base_url isn't reachable directly, so the probe can only succeed
+# through the proxy
+varnish v1 -arg "-p debug=+syncvsl" -vcl {
+	import reqwest from "${vmod}";
+
+	probe p1 {
+		.url = "/probe";
+		.initial = 1;
+		.threshold = 2;
+		.interval = 1s;
+	}
+
+	backend be none;
+
+	sub vcl_init {
+		new client = reqwest.client(
+			base_url = "http://${bad_ip}:9090",
+			http_proxy = "http://${sproxy_addr}:${sproxy_port}",
+			probe = p1);
+	}
+} -start
+
+# -d 1: read from the head of the log, the first probe runs at warm.
+# Match "Went" or "Still": what matters is that a probe succeeded.
+logexpect l1 -v v1 -g raw -d 1 {
+	expect * 0 Backend_health "^client (Went|Still) healthy .* Success: 200$"
+} -start
+
+logexpect l1 -wait

@@ -24,8 +24,7 @@ pub struct ProbeState {
     shared: Arc<ProbeShared>,
     url: Url,
     join_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    accept_invalid_certs: bool,
-    accept_invalid_hostnames: bool,
+    client: Client,
 }
 #[allow(non_camel_case_types)]
 pub struct client {
@@ -355,8 +354,7 @@ where
     let spec = probe_state.spec.clone();
     let url = probe_state.url.clone();
     let shared = Arc::clone(&probe_state.shared);
-    let accept_invalid_certs = probe_state.accept_invalid_certs;
-    let accept_invalid_hostnames = probe_state.accept_invalid_hostnames;
+    let client = probe_state.client.clone();
     rt.spawn(async move {
         let history = &shared.history;
         let avg = &shared.avg;
@@ -369,43 +367,29 @@ where
         loop {
             let msg;
             let mut time = 0_f64;
-            let new_bit = match reqwest::ClientBuilder::new()
-                .timeout(spec.timeout)
-                .danger_accept_invalid_certs(accept_invalid_certs)
-                .danger_accept_invalid_hostnames(accept_invalid_hostnames)
-                .build()
-                .map(|req| req.get(url.clone()).send())
-            {
+            let start = Instant::now();
+            let new_bit = match client.get(url.clone()).send().await {
                 Err(e) => {
-                    msg = e.to_string();
+                    msg = format!("Error: {e}");
                     false
                 }
-                Ok(resp) => {
-                    let start = Instant::now();
-                    match resp.await {
-                        Err(e) => {
-                            msg = format!("Error: {e}");
-                            false
-                        }
-                        Ok(resp) if u32::from(resp.status().as_u16()) == spec.exp_status => {
-                            msg = format!("Success: {}", resp.status().as_u16());
-                            if avg_rate < 4.0 {
-                                avg_rate += 1.0;
-                            }
-                            time = start.elapsed().as_secs_f64();
-                            let mut avg = avg.lock().unwrap();
-                            *avg += (time - *avg) / avg_rate;
-                            true
-                        }
-                        Ok(resp) => {
-                            msg = format!(
-                                "Error: expected {} status, got {}",
-                                spec.exp_status,
-                                resp.status().as_u16()
-                            );
-                            false
-                        }
+                Ok(resp) if u32::from(resp.status().as_u16()) == spec.exp_status => {
+                    msg = format!("Success: {}", resp.status().as_u16());
+                    if avg_rate < 4.0 {
+                        avg_rate += 1.0;
                     }
+                    time = start.elapsed().as_secs_f64();
+                    let mut avg = avg.lock().unwrap();
+                    *avg += (time - *avg) / avg_rate;
+                    true
+                }
+                Ok(resp) => {
+                    msg = format!(
+                        "Error: expected {} status, got {}",
+                        spec.exp_status,
+                        resp.status().as_u16()
+                    );
+                    false
                 }
             };
             let bitmap = history.load(Ordering::Relaxed);
@@ -430,11 +414,13 @@ where
     })
 }
 
+/// `builder` carries the client's connection settings (proxies,
+/// `connect_timeout`, certificate checks); the probe timeout is added here,
+/// once the probe defaults are applied.
 pub fn build_probe_state(
     mut probe: Probe,
     base_url: Option<&str>,
-    accept_invalid_certs: bool,
-    accept_invalid_hostnames: bool,
+    builder: reqwest::ClientBuilder,
 ) -> Result<ProbeState, VclError> {
     // sanitize probe (see vbp_set_defaults in Varnish Cache)
     if probe.timeout.is_zero() {
@@ -475,6 +461,14 @@ pub fn build_probe_state(
         Url::parse(spec_url)
             .map_err(|e| VclError::new(format!("probe endpoint {spec_url} ({e})")))?
     };
+    let client = builder
+        .timeout(probe.timeout)
+        // Like native probes, open a fresh connection for every probe, so
+        // `connect_timeout` applies each time and a probe can't succeed on a
+        // stale pooled connection.
+        .pool_max_idle_per_host(0)
+        .build()
+        .map_err(|e| VclError::new(format!("couldn't build the probe client ({e})")))?;
     Ok(ProbeState {
         spec: probe,
         shared: Arc::new(ProbeShared {
@@ -484,8 +478,7 @@ pub fn build_probe_state(
         }),
         join_handle: Mutex::new(None),
         url,
-        accept_invalid_certs,
-        accept_invalid_hostnames,
+        client,
     })
 }
 
@@ -511,7 +504,7 @@ mod tests {
             threshold: 3,
             initial: 2,
         };
-        let state = build_probe_state(probe, None, false, false).unwrap();
+        let state = build_probe_state(probe, None, reqwest::ClientBuilder::new()).unwrap();
         let handle = spawn_probe(rt.handle(), &state, "test".to_string(), |_| {});
         assert_eq!(Arc::strong_count(&state.shared), 2);
         // let the task run a few iterations

@@ -48,7 +48,7 @@ mod reqwest {
             /// - backend fetches (`client.backend()`): if unset, defaults to 30 seconds. It covers sending the request and receiving the response headers, then applies again to each read of the response body, so it doesn't cap the total transfer time.
             /// - `client.send()` requests: unlimited if unset, otherwise a total deadline, from the start of the request until the response body has been fully received.
             ///
-            /// Varnish's own `connect_timeout`, `first_byte_timeout` and `between_bytes_timeout` (parameters and `bereq` variables) are not used. Probes only use the probe's `.timeout`.
+            /// Varnish's own `connect_timeout`, `first_byte_timeout` and `between_bytes_timeout` (parameters and `bereq` variables) are not used. Probes use `connect_timeout`, but not `timeout`: they use the probe's `.timeout` instead.
             timeout: Option<Duration>,
             connect_timeout: Option<Duration>,
             /// `auto_gzip`, `auto_deflate` and `auto_brotli`, if set, will automatically set the relevant `accept-encoding` values and automatically decompress the response
@@ -67,7 +67,7 @@ mod reqwest {
             ///
             /// If neither `http_proxy` nor `https_proxy` is set, the proxies are read from varnishd's environment: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY` (or their lowercase versions), for backend fetches and `client.send()` requests. Setting either parameter disables the environment proxies completely, including `NO_PROXY`, so setting only `http_proxy` means `https://` requests are sent directly.
             ///
-            /// Probes never use `http_proxy` or `https_proxy`: they always use the environment proxies, if any.
+            /// Probes use the same proxies as the other requests, including the environment proxies when neither parameter is set.
             http_proxy: Option<&str>,
             /// HTTPS proxy to send your `https://` requests through. See `http_proxy` for how it interacts with the environment.
             https_proxy: Option<&str>,
@@ -78,44 +78,51 @@ mod reqwest {
             /// - this means `client`s without`base_url` can actually probe a another server that the one used as a backend.
             probe: Option<Probe>,
         ) -> Result<Self, VclError> {
-            // set some default
-            let mut vrcb = reqwest::ClientBuilder::new()
-                .brotli(auto_brotli)
-                .deflate(auto_deflate)
-                .gzip(auto_gzip)
-                .danger_accept_invalid_certs(accept_invalid_certs)
-                .danger_accept_invalid_hostnames(accept_invalid_hostnames);
-            let mut brcb = reqwest::blocking::ClientBuilder::new()
-                .brotli(auto_brotli)
-                .deflate(auto_deflate)
-                .gzip(auto_gzip)
-                .danger_accept_invalid_certs(accept_invalid_certs)
-                .danger_accept_invalid_hostnames(accept_invalid_hostnames);
-            if let Some(t) = timeout {
-                vrcb = vrcb.timeout(t);
-                brcb = brcb.timeout(t);
-            }
-            if let Some(t) = connect_timeout {
-                vrcb = vrcb.connect_timeout(t);
-                brcb = brcb.connect_timeout(t);
-            }
+            // Build the proxies once, they are shared by all the builders below.
+            let mut proxies = Vec::new();
             if let Some(proxy) = http_proxy {
-                let proxy = reqwest::Proxy::http(proxy).map_err(|e| {
+                proxies.push(reqwest::Proxy::http(proxy).map_err(|e| {
                     VclError::new(format!(
                         "reqwest: couldn't initialize {vcl_name}'s HTTP proxy ({e})"
                     ))
-                })?;
-                vrcb = vrcb.proxy(proxy.clone());
-                brcb = brcb.proxy(proxy);
+                })?);
             }
             if let Some(proxy) = https_proxy {
-                let proxy = reqwest::Proxy::https(proxy).map_err(|e| {
+                proxies.push(reqwest::Proxy::https(proxy).map_err(|e| {
                     VclError::new(format!(
                         "reqwest: couldn't initialize {vcl_name}'s HTTPS proxy ({e})"
                     ))
-                })?;
-                vrcb = vrcb.proxy(proxy.clone());
-                brcb = brcb.proxy(proxy);
+                })?);
+            }
+            // Connection settings shared by the async, blocking and probe
+            // builders (a macro because their types differ). `timeout`,
+            // redirects and compression are not shared with the probe.
+            macro_rules! connection_settings {
+                ($builder:expr) => {{
+                    let mut b = $builder
+                        .danger_accept_invalid_certs(accept_invalid_certs)
+                        .danger_accept_invalid_hostnames(accept_invalid_hostnames);
+                    if let Some(t) = connect_timeout {
+                        b = b.connect_timeout(t);
+                    }
+                    for proxy in &proxies {
+                        b = b.proxy(proxy.clone());
+                    }
+                    b
+                }};
+            }
+            // set some default
+            let mut vrcb = connection_settings!(reqwest::ClientBuilder::new())
+                .brotli(auto_brotli)
+                .deflate(auto_deflate)
+                .gzip(auto_gzip);
+            let mut brcb = connection_settings!(reqwest::blocking::ClientBuilder::new())
+                .brotli(auto_brotli)
+                .deflate(auto_deflate)
+                .gzip(auto_gzip);
+            if let Some(t) = timeout {
+                vrcb = vrcb.timeout(t);
+                brcb = brcb.timeout(t);
             }
             if follow <= 0 {
                 vrcb = vrcb.redirect(reqwest::redirect::Policy::none());
@@ -147,8 +154,7 @@ mod reqwest {
                     build_probe_state(
                         spec,
                         base_url,
-                        accept_invalid_certs,
-                        accept_invalid_hostnames,
+                        connection_settings!(reqwest::ClientBuilder::new()),
                     )
                     .map_err(|e| {
                         VclError::new(format!("reqwest: failed to add probe to {vcl_name} ({e})"))
