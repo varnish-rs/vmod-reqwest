@@ -2,7 +2,7 @@ varnishtest "backend() with chunked body"
 
 server s1 {
 	rxreq
-	txresp -nolen -hdr "Transfer-Encoding: chunked" -hdr "bleep: bloop"
+	txresp -nolen -hdr "Transfer-Encoding: chunked" -hdr "bleep: bloop" -hdr "connection: close"
         chunked "0123456789"
         chunkedlen 0
 	expect req.body == "0123456789abcdefABCDEF"
@@ -30,7 +30,7 @@ varnish v1 -vcl {
 } -start
 varnish v1 -cliok "param.set debug +syncvsl"
 
-logexpect l1 -v v1 -i Fetch_Body {
+logexpect l1 -v v1 -g raw -d 1 -i Fetch_Body {
         expect 0 * Fetch_Body "chunked stream"
 } -start
 
