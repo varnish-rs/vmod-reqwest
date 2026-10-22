@@ -414,15 +414,11 @@ where
     })
 }
 
-/// `builder` carries the client's connection settings (proxies,
-/// `connect_timeout`, certificate checks); the probe timeout is added here,
-/// once the probe defaults are applied.
-pub fn build_probe_state(
-    mut probe: Probe,
-    base_url: Option<&str>,
-    builder: reqwest::ClientBuilder,
-) -> Result<ProbeState, VclError> {
-    // sanitize probe (see vbp_set_defaults in Varnish Cache)
+/// Fill in the unset fields of `probe`, exactly like `vbp_set_defaults()`
+/// does for native backends: VCC leaves unset fields at 0, except
+/// `initial`, which it sets to `u32::MAX` (`~0U`) so that an explicit 0
+/// stays 0.
+fn set_probe_defaults(probe: &mut Probe) {
     if probe.timeout.is_zero() {
         probe.timeout = Duration::from_secs(2);
     }
@@ -438,10 +434,21 @@ pub fn build_probe_state(
     if probe.exp_status == 0 {
         probe.exp_status = 200;
     }
-    if probe.initial == 0 {
+    if probe.initial == u32::MAX {
         probe.initial = probe.threshold - 1;
     }
     probe.initial = std::cmp::min(probe.initial, probe.threshold);
+}
+
+/// `builder` carries the client's connection settings (proxies,
+/// `connect_timeout`, certificate checks); the probe timeout is added here,
+/// once the probe defaults are applied.
+pub fn build_probe_state(
+    mut probe: Probe,
+    base_url: Option<&str>,
+    builder: reqwest::ClientBuilder,
+) -> Result<ProbeState, VclError> {
+    set_probe_defaults(&mut probe);
     let spec_url = match probe.request {
         ProbeRequest::Url(ref u) => u,
         ProbeRequest::Text(_) => {
@@ -513,5 +520,58 @@ mod tests {
         let err = rt.block_on(handle).unwrap_err();
         assert!(err.is_cancelled());
         assert_eq!(Arc::strong_count(&state.shared), 1);
+    }
+
+    fn unset_probe() -> Probe {
+        // what VCC emits for a probe with only .url set
+        Probe {
+            request: ProbeRequest::Url("/".to_string()),
+            timeout: Duration::ZERO,
+            interval: Duration::ZERO,
+            exp_status: 0,
+            window: 0,
+            threshold: 0,
+            initial: u32::MAX,
+        }
+    }
+
+    #[test]
+    fn probe_defaults_match_native() {
+        let mut probe = unset_probe();
+        set_probe_defaults(&mut probe);
+        assert_eq!(probe.timeout, Duration::from_secs(2));
+        assert_eq!(probe.interval, Duration::from_secs(5));
+        assert_eq!(probe.window, 8);
+        assert_eq!(probe.threshold, 3);
+        assert_eq!(probe.exp_status, 200);
+        // unset: one good probe short of the threshold
+        assert_eq!(probe.initial, 2);
+
+        // unset .initial follows an explicit .threshold
+        let mut probe = unset_probe();
+        probe.window = 10;
+        probe.threshold = 5;
+        set_probe_defaults(&mut probe);
+        assert_eq!(probe.initial, 4);
+    }
+
+    #[test]
+    fn probe_explicit_initial_is_kept() {
+        // an explicit 0 is not "unset"
+        let mut probe = unset_probe();
+        probe.initial = 0;
+        set_probe_defaults(&mut probe);
+        assert_eq!(probe.initial, 0);
+
+        let mut probe = unset_probe();
+        probe.initial = 1;
+        set_probe_defaults(&mut probe);
+        assert_eq!(probe.initial, 1);
+
+        // but it is capped at the threshold
+        let mut probe = unset_probe();
+        probe.initial = 7;
+        set_probe_defaults(&mut probe);
+        assert_eq!(probe.initial, 3);
     }
 }

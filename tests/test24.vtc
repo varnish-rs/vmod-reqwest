@@ -1,0 +1,55 @@
+varnishtest "probe defaults match native backends"
+
+# With .initial unset, a probe starts with .threshold - 1 good probes, so
+# both a native backend and a reqwest client start sick, and stay sick
+# after a failed probe. VCC encodes an unset .initial as ~0U, which
+# reqwest used to clamp to .threshold, making the client start healthy
+# (and stay healthy after a failed probe).
+
+server s1 -repeat 2 {
+    rxreq
+    txresp -status 500
+} -start
+
+varnish v1 -vcl {
+    import reqwest from "${vmod}";
+    import std;
+
+    probe p1 {
+        .url = "/";
+        .interval = 60s;
+    }
+
+    backend be {
+        .host = "${s1_addr}";
+        .port = "${s1_port}";
+        .probe = p1;
+    }
+
+    sub vcl_init {
+        new client = reqwest.client(
+            base_url = "http://${s1_addr}:${s1_port}",
+            probe = p1);
+        if (std.healthy(be)) {
+            return (fail("native backend should be sick"));
+        }
+        if (std.healthy(client.backend())) {
+            return (fail("reqwest client should be sick"));
+        }
+    }
+} -start
+
+# the first probe of each fails, which leaves the 2 initial good probes:
+# 2/8, below the default threshold of 3
+logexpect l1 -v v1 -g raw -d 1 -i Backend_health {
+    expect * 0 Backend_health "^be .* \"HTTP/1.1 500 OK\"$"
+} -run
+
+logexpect l2 -v v1 -g raw -d 1 -i Backend_health {
+    expect * 0 Backend_health "^client .* got 500$"
+} -run
+
+varnish v1 -cliexpect "vcl1.be +probe +2/8 +sick" backend.list
+varnish v1 -cliexpect "vcl1.client +probe +2/8 +sick" backend.list
+
+varnish v1 -expect MGT.child_panic == 0
