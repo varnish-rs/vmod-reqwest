@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -42,12 +44,26 @@ pub struct VCLBackend {
     pub base_url: Option<String>,
 }
 
-// silly helper until varnish-rs provides something more ergonomic
-fn sob_helper<'a>(sob: &'a StrOrBytes) -> &'a str {
-    match sob {
-        StrOrBytes::Bytes(_) => panic!("{sob:?} isn't a string"),
-        StrOrBytes::Utf8(s) => s,
+/// Turn `bereq.url` into a string reqwest can parse. Varnish doesn't require
+/// the URL to be UTF-8, so valid runs are kept verbatim and every byte of an
+/// invalid sequence is percent-encoded. Existing `%` escapes are left alone,
+/// so an already-encoded URL goes through unchanged.
+fn url_bytes_to_string(bytes: &[u8]) -> Cow<'_, str> {
+    let mut chunks = bytes.utf8_chunks();
+    let Some(first) = chunks.next() else {
+        return Cow::Borrowed("");
+    };
+    if first.invalid().is_empty() {
+        return Cow::Borrowed(first.valid());
     }
+    let mut out = String::with_capacity(bytes.len() + 2 * first.invalid().len());
+    for chunk in std::iter::once(first).chain(chunks) {
+        out.push_str(chunk.valid());
+        for b in chunk.invalid() {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    Cow::Owned(out)
 }
 
 #[allow(clippy::extra_unused_lifetimes)]
@@ -60,7 +76,7 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
         let bereq = ctx.http_bereq.as_ref().unwrap();
 
         let sob = bereq.url().unwrap();
-        let bereq_url = sob_helper(&sob);
+        let bereq_url = url_bytes_to_string(sob.as_ref());
 
         let url = if let Some(base_url) = &self.base_url {
             // if the client has a base_url, prepend it to bereq.url
@@ -68,7 +84,9 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
         } else if bereq_url.starts_with('/') {
             // otherwise, if bereq.url looks like a path, try to find a host to build a full URL
             if let Some(host) = bereq.header("host") {
-                let host_str = sob_helper(&host);
+                let StrOrBytes::Utf8(host_str) = host else {
+                    return Err("bereq.http.host isn't valid UTF-8".into());
+                };
                 format!(
                     "{}://{}{}",
                     if self.https { "https" } else { "http" },
@@ -80,10 +98,11 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             }
         } else {
             // else use bereq.url as-is
-            bereq_url.to_string()
+            bereq_url.into_owned()
         };
 
-        let method = sob_helper(&bereq.method().unwrap()).to_string();
+        let method = reqwest::Method::from_bytes(bereq.method().unwrap().as_ref())
+            .map_err(|e| VclError::new(e.to_string()))?;
         let headers: Vec<(String, Vec<u8>)> = bereq
             .into_iter()
             .map(|(k, v)| (k.into(), v.as_ref().to_owned()))
@@ -97,8 +116,6 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
             body = Some(body_vec);
         }
 
-        let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|e| <String as Into<VclError>>::into(e.to_string()))?;
         let mut rb = self.blocking_client.request(method, url);
         for (k, v) in headers {
             rb = rb.header(k, v);
@@ -485,6 +502,32 @@ pub fn build_probe_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_bytes_to_string_encodes_invalid_utf8() {
+        // valid UTF-8 (including existing escapes and multibyte chars) is
+        // borrowed as-is
+        assert!(matches!(
+            url_bytes_to_string(b"/a%41b"),
+            Cow::Borrowed("/a%41b")
+        ));
+        assert!(matches!(
+            url_bytes_to_string("/\u{e9}\u{20ac}".as_bytes()),
+            Cow::Borrowed("/\u{e9}\u{20ac}")
+        ));
+        assert!(matches!(url_bytes_to_string(b""), Cow::Borrowed("")));
+        // a lone invalid byte
+        assert_eq!(url_bytes_to_string(b"/\xff"), "/%FF");
+        // a truncated sequence: every byte is encoded, the rest is kept
+        assert_eq!(url_bytes_to_string(b"/\xe2\x82?a=1"), "/%E2%82?a=1");
+        // an existing escape next to an invalid byte is left alone
+        assert_eq!(url_bytes_to_string(b"/%41\xfe%42"), "/%41%FE%42");
+        // valid multibyte runs around invalid bytes stay verbatim
+        assert_eq!(
+            url_bytes_to_string(b"/\xc3\xa9\x80\xe2\x82\xac"),
+            "/\u{e9}%80\u{20ac}"
+        );
+    }
 
     // Guard, not a fail-before test: the old code could not even express this
     // (the task borrowed `ProbeState` fields for 'static). It checks that the

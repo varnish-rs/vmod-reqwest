@@ -1,0 +1,54 @@
+varnishtest "bereq fields that aren't valid UTF-8"
+
+# Varnish doesn't require bereq.url, bereq.method or bereq.http.host to be
+# UTF-8; the backend used to panic on them
+
+server s1 {
+    rxreq
+    expect req.url == "/%FF"
+    txresp
+} -start
+
+varnish v1 -vcl+backend {
+    import reqwest from "${vmod}";
+
+    sub vcl_init {
+        new with_base = reqwest.client(base_url = "http://${s1_addr}:${s1_port}");
+        new no_base = reqwest.client();
+    }
+
+    sub vcl_recv {
+        if (req.http.no-base) {
+            set req.backend_hint = no_base.backend();
+        } else {
+            set req.backend_hint = with_base.backend();
+        }
+        return (pass);
+    }
+} -start
+
+logexpect l1 -v v1 -g raw -i FetchError {
+    expect * * FetchError "^reqwest: bereq.http.host isn't valid UTF-8$"
+    expect * * FetchError "^reqwest: invalid HTTP method$"
+} -start
+
+client c1 {
+    # invalid bytes in the URL are percent-encoded
+    txreq -url "/\xff"
+    rxresp
+    expect resp.status == 200
+
+    # a Host that isn't UTF-8 can't build a URL
+    txreq -url "/" -hdr "no-base: 1" -hdr "Host: \xff"
+    rxresp
+    expect resp.status == 503
+
+    # reqwest rejects a method that isn't a valid token
+    txreq -req "\xffGET" -url "/"
+    rxresp
+    expect resp.status == 503
+} -run
+
+logexpect l1 -wait
+
+varnish v1 -expect MGT.child_panic == 0
