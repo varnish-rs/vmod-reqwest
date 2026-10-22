@@ -19,6 +19,26 @@ struct ProbeShared {
     health_changed: Mutex<SystemTime>,
 }
 
+impl ProbeShared {
+    /// Forget the probe history and start over from `spec.initial` good
+    /// probes, like `vbp_reset()` does for native backends when they are
+    /// created and on every warm/cold transition. `health_changed` moves to
+    /// `now` if that flips the health.
+    fn reset(&self, spec: &Probe, now: SystemTime) {
+        let bitmap = initial_bitmap(spec.initial);
+        let old = self.history.swap(bitmap, Ordering::Relaxed);
+        if is_healthy(old, spec.window, spec.threshold)
+            != is_healthy(bitmap, spec.window, spec.threshold)
+        {
+            *self
+                .health_changed
+                .lock()
+                .expect("health_changed mutex poisoned") = now;
+        }
+        *self.avg.lock().expect("avg mutex poisoned") = 0_f64;
+    }
+}
+
 pub struct ProbeState {
     spec: Probe,
     shared: Arc<ProbeShared>,
@@ -167,6 +187,9 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
         match event {
             // start the probing loop
             Event::Warm => {
+                probe_state
+                    .shared
+                    .reset(&probe_state.spec, SystemTime::now());
                 let handle = spawn_probe(bgt.rt.handle(), probe_state, self.name.clone(), |msg| {
                     log(LogTag::BackendHealth, msg);
                 });
@@ -188,6 +211,9 @@ impl<'a> VclBackend<BackendResp> for VCLBackend {
                 if let Some(handle) = handle {
                     handle.abort();
                 }
+                probe_state
+                    .shared
+                    .reset(&probe_state.spec, SystemTime::now());
             }
             _ => {}
         }
@@ -316,6 +342,15 @@ impl VclResponse for BackendResp {
     }
 }
 
+/// The bitmap `initial` good probes yield.
+fn initial_bitmap(initial: u32) -> u64 {
+    if initial >= 64 {
+        u64::MAX
+    } else {
+        (1_u64 << initial) - 1
+    }
+}
+
 fn good_probes(bitmap: u64, window: u32) -> u32 {
     bitmap.wrapping_shl(64_u32 - window).count_ones()
 }
@@ -358,11 +393,6 @@ where
     rt.spawn(async move {
         let history = &shared.history;
         let avg = &shared.avg;
-        let mut h = 0_u64;
-        for i in 0..std::cmp::min(spec.initial, 64) {
-            h |= 1 << i;
-        }
-        history.store(h, Ordering::Relaxed);
         let mut avg_rate = 0_f64;
         loop {
             let msg;
@@ -469,10 +499,13 @@ pub fn build_probe_state(
         .pool_max_idle_per_host(0)
         .build()
         .map_err(|e| VclError::new(format!("couldn't build the probe client ({e})")))?;
+    // seeded here rather than by the probe task, so the backend has its
+    // initial health before the VCL is warm
+    let bitmap = initial_bitmap(probe.initial);
     Ok(ProbeState {
         spec: probe,
         shared: Arc::new(ProbeShared {
-            history: AtomicU64::new(0),
+            history: AtomicU64::new(bitmap),
             avg: Mutex::new(0_f64),
             health_changed: Mutex::new(SystemTime::now()),
         }),
@@ -513,5 +546,63 @@ mod tests {
         let err = rt.block_on(handle).unwrap_err();
         assert!(err.is_cancelled());
         assert_eq!(Arc::strong_count(&state.shared), 1);
+    }
+
+    fn seeded_probe() -> Probe {
+        Probe {
+            request: ProbeRequest::Url("http://127.0.0.1:1/probe".to_string()),
+            timeout: Duration::from_secs(1),
+            interval: Duration::from_secs(60),
+            exp_status: 200,
+            window: 8,
+            threshold: 3,
+            initial: 3,
+        }
+    }
+
+    #[test]
+    fn initial_bitmap_sets_initial_low_bits() {
+        assert_eq!(initial_bitmap(0), 0);
+        assert_eq!(initial_bitmap(3), 0b111);
+        assert_eq!(initial_bitmap(63), u64::MAX >> 1);
+        assert_eq!(initial_bitmap(64), u64::MAX);
+        assert_eq!(initial_bitmap(65), u64::MAX);
+    }
+
+    // Like a native backend, the client must have its .initial health as
+    // soon as it is created, without waiting for the probe task (which only
+    // starts once the VCL is warm).
+    #[test]
+    fn probe_state_is_seeded_on_creation() {
+        let state = build_probe_state(seeded_probe(), None, reqwest::ClientBuilder::new()).unwrap();
+        let bitmap = state.shared.history.load(Ordering::Relaxed);
+        assert_eq!(bitmap, 0b111);
+        assert!(is_healthy(bitmap, 8, 3));
+    }
+
+    // Warm and Cold start over from .initial (see vbp_reset), moving
+    // `health_changed` only if that flips the health.
+    #[test]
+    fn reset_restores_initial_health() {
+        let state = build_probe_state(seeded_probe(), None, reqwest::ClientBuilder::new()).unwrap();
+        let shared = &state.shared;
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + Duration::from_secs(1);
+        let t2 = t0 + Duration::from_secs(2);
+        let changed = || *shared.health_changed.lock().unwrap();
+        // a sick history, as if the initial good probes had been pushed out
+        // of the window by failures
+        shared.history.store(0, Ordering::Relaxed);
+        *shared.health_changed.lock().unwrap() = t0;
+        *shared.avg.lock().unwrap() = 1.5;
+
+        shared.reset(&state.spec, t1);
+        assert_eq!(shared.history.load(Ordering::Relaxed), 0b111);
+        assert_eq!(changed(), t1);
+        assert_eq!(shared.avg.lock().unwrap().to_bits(), 0_f64.to_bits());
+
+        // already healthy: no flip, `health_changed` stays
+        shared.reset(&state.spec, t2);
+        assert_eq!(changed(), t1);
     }
 }

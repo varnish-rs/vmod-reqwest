@@ -1,0 +1,39 @@
+varnishtest "probe .initial is applied before the VCL is warm"
+
+# Like a native backend, a reqwest client starts with .initial good
+# probes, so it is already healthy in vcl_init, before any probe ran.
+# The bitmap used to be seeded by the probe task, which only starts on
+# warm, so the client was sick until then.
+varnish v1 -vcl {
+    import reqwest from "${vmod}";
+    import std;
+
+    probe p1 {
+        .url = "/";
+        .interval = 60s;
+        .timeout = 1s;
+        .window = 8;
+        .threshold = 3;
+        .initial = 3;
+    }
+
+    backend be {
+        .host = "${bad_ip}";
+        .port = "9090";
+        .probe = p1;
+    }
+
+    sub vcl_init {
+        new client = reqwest.client(
+            base_url = "http://${bad_ip}:9090",
+            probe = p1);
+        if (!std.healthy(be)) {
+            return (fail("native backend should be healthy"));
+        }
+        if (!std.healthy(client.backend())) {
+            return (fail("reqwest client should be healthy"));
+        }
+    }
+} -start
+
+varnish v1 -expect MGT.child_panic == 0
